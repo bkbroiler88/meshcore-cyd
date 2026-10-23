@@ -3,6 +3,8 @@
 MeshCore companion and repeater firmware for two "Cheap Yellow Display" ESP32 boards with an
 Ebyte E22-900M30S (SX1262 + 1 W PA), with a colour touch UI drawn straight on the panel.
 
+Module I used in this build is here: https://wirelesswizard.net/ols/products/bkbroiler-mesh-v1-pre-order
+
 Based on [meshcore-dev/meshcore](https://github.com/meshcore-dev/meshcore) at `81dbae5`
 (2026-10-15). This repository is maintained independently; it is a snapshot plus the changes
 below, not a fork with upstream history.
