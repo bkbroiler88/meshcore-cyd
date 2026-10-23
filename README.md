@@ -15,6 +15,19 @@ below, not a fork with upstream history.
 Both: SPI 18/19/23 shared with the SD slot (CS 5), E22 TXEN jumpered to its own DIO2, TCXO 1.8 V,
 BOOT button GPIO 0, battery sense GPIO 34, no I2C.
 
+## Screens
+
+Repeater, 3.5" (480x320), Status page:
+
+![Repeater status page](docs/images/repeater-status-35.png)
+
+Repeater Settings page (stepper rows; radio and node rows need BOOT held while tapping):
+
+![Repeater settings page](docs/images/repeater-settings-35.png)
+
+Captured from the running board with `tools/screenshot.py` (long-press the node name in the
+status bar, or send `screenshot` on the repeater's serial CLI).
+
 ## Environments
 
 All in `variants/lcdwiki_cyd/platformio.ini`.

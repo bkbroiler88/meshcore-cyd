@@ -157,4 +157,8 @@ public:
   bool touchedNative(int* x, int* y);
 
   LGFX_CYD& device() { return disp; }
+
+  // Stream the panel contents over a serial port as RGB565 (header + raw rows), for
+  // README screenshots. Blocks for the duration (~13 s at 115200 on the 2.8").
+  void dumpScreenshot(Stream& out);
 };

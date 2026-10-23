@@ -197,9 +197,17 @@ void loop() {
       the_mesh.handleCommand(0, command, reply);
     }
 #else
-    MESH_LOCK();
-    the_mesh.handleCommand(0, command, reply);  // NOTE: there is no sender_timestamp via serial!
-    MESH_UNLOCK();
+  #if defined(UI_CYD) && defined(DISPLAY_CLASS)
+    if (strcmp(command, "screenshot") == 0) {
+      ui_task.screenshot();   // stream the panel over this port (tools/screenshot.py)
+      strcpy(reply, "OK");
+    } else
+  #endif
+    {
+      MESH_LOCK();
+      the_mesh.handleCommand(0, command, reply);  // NOTE: there is no sender_timestamp via serial!
+      MESH_UNLOCK();
+    }
 #endif
     if (reply[0]) {
       Serial.print("  -> "); Serial.println(reply);

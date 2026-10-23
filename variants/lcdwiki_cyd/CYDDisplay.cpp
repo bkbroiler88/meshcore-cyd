@@ -145,3 +145,17 @@ bool CYDDisplay::touched(int* x, int* y) {
   *y = (int)(ny / UI_ZOOM);
   return true;
 }
+
+void CYDDisplay::dumpScreenshot(Stream& out) {
+  static uint16_t line[480];
+  int w = disp.width(), h = disp.height();
+  out.print("\nSCREENSHOT "); out.print(w); out.print(' '); out.print(h); out.print('\n');
+  out.flush();
+  for (int y = 0; y < h; y++) {
+    disp.readRect(0, y, w, 1, line);
+    out.write((const uint8_t*)line, w * 2);
+    out.flush();
+  }
+  out.print("\nSCREENSHOT_END\n");
+  out.flush();
+}

@@ -1166,6 +1166,10 @@ void UITask::onDrag(int dy) {
 }
 
 void UITask::onLongPress(int x, int y) {
+  if (y < S(L::STATUS_H) && x < S(110) && _screen != Screen::CHAT) {   // status-bar name: screenshot over serial
+    _display->dumpScreenshot(Serial);
+    return;
+  }
   if (millis() - _ui_started_at < 8000) {
     the_mesh.enterCLIRescue();
     showAlert("CLI rescue mode", 1500);

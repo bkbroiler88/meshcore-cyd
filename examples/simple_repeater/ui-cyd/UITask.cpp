@@ -627,6 +627,10 @@ void UITask::onDrag(int dy) {
 }
 
 void UITask::onLongPress(int x, int y) {
+  if (y < S(L::STATUS_H) && x < S(110)) {   // status-bar name: screenshot over serial
+    _display->dumpScreenshot(Serial);
+    return;
+  }
   if (_screen == Screen::NEIGHBOURS && y >= S(L::STATUS_H) && y < GH - S(L::TAB_H)) {
     int row = _listScroll + (y - S(L::STATUS_H)) / S(NB_ROW_H);
     const NeighbourInfo* nb[MAX_NEIGHBOURS];

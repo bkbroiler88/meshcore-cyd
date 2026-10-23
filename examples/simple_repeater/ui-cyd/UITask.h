@@ -109,6 +109,7 @@ public:
   }
   void begin(NodePrefs* node_prefs, const char* build_date, const char* firmware_version);
   void loop();
+  void screenshot() { if (_display) _display->dumpScreenshot(Serial); }
 #ifdef SPECTRUM_ANALYZER
   bool ownsRadio() const { return _specOwn; }
 #else
