@@ -1,0 +1,1116 @@
+#include "SensorMesh.h"
+#include <helpers/RoutingPolicy.h>
+#include <helpers/sensors/LPPDataHelpers.h>
+
+/* ------------------------------ Config -------------------------------- */
+
+#ifndef LORA_FREQ
+  #define LORA_FREQ   915.0
+#endif
+#ifndef LORA_BW
+  #define LORA_BW     250
+#endif
+#ifndef LORA_SF
+  #define LORA_SF     10
+#endif
+#ifndef LORA_CR
+  #define LORA_CR      5
+#endif
+#ifndef LORA_TX_POWER
+  #define LORA_TX_POWER  20
+#endif
+
+#ifndef ADVERT_NAME
+  #define  ADVERT_NAME   "sensor"
+#endif
+#ifndef ADVERT_LAT
+  #define  ADVERT_LAT  0.0
+#endif
+#ifndef ADVERT_LON
+  #define  ADVERT_LON  0.0
+#endif
+
+#ifndef ADMIN_PASSWORD
+  #define  ADMIN_PASSWORD  "password"
+#endif
+
+#ifndef SERVER_RESPONSE_DELAY
+  #define SERVER_RESPONSE_DELAY   300
+#endif
+
+#ifndef TXT_ACK_DELAY
+  #define TXT_ACK_DELAY     200
+#endif
+
+#ifndef SENSOR_READ_INTERVAL_SECS
+  #define SENSOR_READ_INTERVAL_SECS  60
+#endif
+
+/* ------------------------------ Code -------------------------------- */
+
+#define FIRMWARE_VER_LEVEL       1
+
+#define REQ_TYPE_LOGIN               0x00
+#define REQ_TYPE_GET_STATUS          0x01
+#define REQ_TYPE_KEEP_ALIVE          0x02
+#define REQ_TYPE_GET_TELEMETRY_DATA  0x03
+#define REQ_TYPE_GET_AVG_MIN_MAX     0x04
+#define REQ_TYPE_GET_ACCESS_LIST     0x05
+#define REQ_TYPE_GET_NEIGHBOURS      0x06  // repeater only (at present)
+
+#define REQ_TYPE_SUBSCRIBE           0x08
+#define REQ_TYPE_UNSUBSCRIBE         0x09
+
+#define RESP_SERVER_LOGIN_OK      0   // response to ANON_REQ
+
+#define CLI_REPLY_DELAY_MILLIS  1000
+
+#define LAZY_CONTACTS_WRITE_DELAY       5000
+
+#define ALERT_ACK_EXPIRY_MILLIS         8000   // wait 8 secs for ACKs to alert messages
+
+static File openAppend(FILESYSTEM* _fs, const char* fname) {
+  #if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
+    return _fs->open(fname, FILE_O_WRITE);
+  #elif defined(RP2040_PLATFORM)
+    return _fs->open(fname, "a");
+  #else
+    return _fs->open(fname, "a", true);
+  #endif
+}
+
+/* --------------------- Cayenne LPP helpers ----------------------------*/
+
+static float findTelemValue(const uint8_t* buf, uint8_t size, uint8_t channel, uint8_t type, float def_value) {
+  uint8_t i = 0;
+
+  while (i + 2 < size) {
+    // Get channel #
+    uint8_t ch = buf[i++];
+    // Get data type
+    uint8_t t = buf[i++];
+    uint8_t sz = LPPData::getDataSize(t);
+
+    if (ch == channel && t == type) {
+      return LPPData::getFloat(&buf[i], sz, LPPData::getMultiplier(t), LPPData::isSigned(t));
+    }
+    i += sz;  // skip
+  }
+  return def_value;   // not found
+}
+
+/* ------------------ end Cayenne LPP helpers ----------------------*/
+
+bool SensorMesh::telemHasChanged(ClientInfo* c) {
+  auto buf = telemetry.getBuffer();
+  uint8_t size = telemetry.getSize();
+  uint8_t i = 0;
+  bool changed = false;
+
+  while (i + 2 < c->extra.sensor.min_deltas_len) {
+    uint8_t ch = c->extra.sensor.min_deltas[i];    // Get channel #
+    uint8_t t = c->extra.sensor.min_deltas[i + 1];     // Get data type
+    uint8_t sz = LPPData::getDataSize(t);
+
+    float min_delta = LPPData::getFloat(&c->extra.sensor.min_deltas[i + 2], sz, LPPData::getMultiplier(t), LPPData::isSigned(t));
+    float pv = LPPData::getFloat(&c->extra.sensor.prev_telem[i + 2], sz, LPPData::getMultiplier(t), LPPData::isSigned(t));
+
+    float v = findTelemValue(buf, size, ch, t, 0.0f);
+    if (abs(v - pv) > min_delta) changed = true;   // Yes, has changed
+
+    i += 2 + sz;  // skip
+  }
+  if (changed) {
+    // take snapshot of all _monitored_ telem values, for next cycle
+    i = 0;
+    while (i + 2 < c->extra.sensor.min_deltas_len) {
+      uint8_t ch = c->extra.sensor.min_deltas[i];    // Get channel #
+      uint8_t t = c->extra.sensor.min_deltas[i + 1];     // Get data type
+      uint8_t sz = LPPData::getDataSize(t);
+
+      c->extra.sensor.prev_telem[i] = ch;
+      c->extra.sensor.prev_telem[i + 1] = t;
+
+      float v = findTelemValue(buf, size, ch, t, 0.0f);
+      LPPData::putFloat(&c->extra.sensor.prev_telem[i + 2], v, sz, LPPData::getMultiplier(t), LPPData::isSigned(t));
+
+      i += 2 + sz;  // skip
+    }
+  }
+  return changed;
+}
+
+uint8_t SensorMesh::handleRequest(ClientInfo* from, uint32_t sender_timestamp, uint8_t req_type, uint8_t* payload, size_t payload_len) {
+  uint8_t perms = from->isAdmin() ? 0xFF : from->permissions;
+
+  memcpy(reply_data, &sender_timestamp, 4);   // reflect sender_timestamp back in response packet (kind of like a 'tag')
+
+  if (req_type == REQ_TYPE_GET_TELEMETRY_DATA) {  // allow all
+    uint8_t perm_mask = ~(payload[0]);    // NEW: first reserved byte (of 4), is now inverse mask to apply to permissions
+
+    telemetry.reset();
+    telemetry.addVoltage(TELEM_CHANNEL_SELF, (float)board.getBattMilliVolts() / 1000.0f);
+    // query other sensors -- target specific
+    sensors.querySensors(0xFF & perm_mask, telemetry);  // allow all telemetry permissions for admin or guest
+    // TODO: let requester know permissions they have:  telemetry.addPresence(TELEM_CHANNEL_SELF, perms);
+    float temperature = board.getMCUTemperature();
+    if (!isnan(temperature)) {   // Supported boards with built-in temperature sensor. ESP32-C3 may return NAN
+      telemetry.addTemperature(TELEM_CHANNEL_SELF, temperature);    // Built-in MCU Temperature
+    }
+
+    uint8_t tlen = telemetry.getSize();
+    memcpy(&reply_data[4], telemetry.getBuffer(), tlen);
+    return 4 + tlen;  // reply_len
+  }
+  if (req_type == REQ_TYPE_GET_AVG_MIN_MAX && (perms & PERM_ACL_ROLE_MASK) >= PERM_ACL_READ_ONLY) {
+    uint32_t start_secs_ago, end_secs_ago;
+    memcpy(&start_secs_ago, &payload[0], 4);
+    memcpy(&end_secs_ago, &payload[4], 4);
+    uint8_t res1 = payload[8];   // reserved for future  (extra query params)
+    uint8_t res2 = payload[9];
+
+    MinMaxAvg data[8];
+    int n;
+    if (res1 == 0 && res2 == 0) {
+      n = querySeriesData(start_secs_ago, end_secs_ago, data, 8);
+    } else {
+      n = 0;
+    }
+
+    uint8_t ofs = 4;
+    {
+      uint32_t now = getRTCClock()->getCurrentTime();
+      memcpy(&reply_data[ofs], &now, 4); ofs += 4;
+    }
+
+    for (int i = 0; i < n; i++) {
+      auto d = &data[i];
+      reply_data[ofs++] = d->_channel;
+      reply_data[ofs++] = d->_lpp_type;
+      uint8_t sz = LPPData::getDataSize(d->_lpp_type);
+      uint32_t mult = LPPData::getMultiplier(d->_lpp_type);
+      bool is_signed = LPPData::isSigned(d->_lpp_type);
+      ofs += LPPData::putFloat(&reply_data[ofs], d->_min, sz, mult, is_signed);
+      ofs += LPPData::putFloat(&reply_data[ofs], d->_max, sz, mult, is_signed);
+      ofs += LPPData::putFloat(&reply_data[ofs], d->_avg, sz, mult, is_signed);
+    }
+    return ofs;
+  }
+  if (req_type == REQ_TYPE_GET_ACCESS_LIST && (perms & PERM_ACL_ROLE_MASK) == PERM_ACL_ADMIN) {
+    uint8_t res1 = payload[0];   // reserved for future  (extra query params)
+    uint8_t res2 = payload[1];
+    if (res1 == 0 && res2 == 0) {
+      uint8_t ofs = 4;
+      for (int i = 0; i < acl.getNumClients() && ofs + 7 <= sizeof(reply_data) - 4; i++) {
+        auto c = acl.getClientByIdx(i);
+        if (c->permissions == 0) continue;  // skip deleted entries
+        memcpy(&reply_data[ofs], c->id.pub_key, 6); ofs += 6;  // just 6-byte pub_key prefix
+        reply_data[ofs++] = c->permissions;
+      }
+      return ofs;
+    }
+  }
+  if (req_type == REQ_TYPE_SUBSCRIBE && payload_len >= 8 && (perms & PERM_ACL_ROLE_MASK) >= PERM_ACL_READ_ONLY) {
+    memcpy(&from->extra.sensor.push_tag, &payload[0], 4);
+    uint16_t timeout_secs;
+    memcpy(&timeout_secs, &payload[4], 2);
+    uint8_t  reserved = payload[6];
+    uint8_t  min_deltas_len = payload[7];
+    RegionEntry* r;
+    if (recv_pkt_region && !recv_pkt_region->isWildcard()) {   // use request scope
+      r = recv_pkt_region;
+    } else {   // use default scope
+      r = region_map.getDefaultRegion();
+    }
+    uint8_t reply_len;
+    if (r && min_deltas_len >= 3 && min_deltas_len <= sizeof(from->extra.sensor.min_deltas)) {
+      from->extra.sensor.scope_region_id = r->id;
+      from->extra.sensor.expiry_timestamp = getRTCClock()->getCurrentTime() + timeout_secs;
+      from->extra.sensor.min_deltas_len = min_deltas_len;
+      memcpy(from->extra.sensor.min_deltas, &payload[8], min_deltas_len);
+      // reply with actual expiry seconds (we could modify/impose restriction)
+      memcpy(&reply_data[4], &timeout_secs, 2);
+      memset(&reply_data[6], 0, 2);  // reserved
+      strcpy((char *)&reply_data[8], r ? r->name : "");  // reply with name of scope that will be used
+      reply_len = 8 + strlen((char *)&reply_data[8]);
+    } else {
+      memset(&reply_data[4], 0, 4);  // expiry secs (0 for error)
+      reply_len = 8;
+    }
+    return reply_len;
+  }
+  if (req_type == REQ_TYPE_UNSUBSCRIBE && (perms & PERM_ACL_ROLE_MASK) >= PERM_ACL_READ_ONLY) {
+    from->extra.sensor.scope_region_id = 0;
+    from->extra.sensor.push_tag = 0;
+    from->extra.sensor.expiry_timestamp = 0;
+    from->extra.sensor.min_deltas_len = 0;
+    // REVISIT: maybe return some stats, eg total number of telemetry pushes since SUBSCRIBE?
+    memset(&reply_data[4], 0, 8);  // success
+    getRNG()->random(&reply_data[12], 2);   // just some entropy for better packet-hash uniqueness
+    return 12 + 2;
+  }
+  return 0;  // unknown command
+}
+
+mesh::Packet* SensorMesh::createSelfAdvert() {
+  uint8_t app_data[MAX_ADVERT_DATA_SIZE];
+  uint8_t app_data_len = _cli.buildAdvertData(ADV_TYPE_SENSOR, app_data);
+
+  return createAdvert(self_id, app_data, app_data_len);
+}
+
+void SensorMesh::sendAlert(const ClientInfo* c, Trigger* t) {
+  int text_len = strlen(t->text);
+
+  uint8_t data[MAX_PACKET_PAYLOAD];
+  memcpy(data, &t->timestamp, 4);
+  data[4] = (TXT_TYPE_PLAIN << 2) | t->attempt;  // attempt and flags
+  memcpy(&data[5], t->text, text_len);
+
+  // calc expected ACK reply
+  mesh::Utils::sha256((uint8_t *)&t->expected_acks[t->attempt], 4, data, 5 + text_len, self_id.pub_key, PUB_KEY_SIZE);
+  t->attempt++;
+
+  auto pkt = createDatagram(PAYLOAD_TYPE_TXT_MSG, c->id, c->shared_secret, data, 5 + text_len);
+  if (pkt) {
+    if (c->out_path_len != OUT_PATH_UNKNOWN) {  // we have an out_path, so send DIRECT
+      sendDirect(pkt, c->out_path, c->out_path_len);
+    } else {
+      unsigned long delay_millis = 0;
+      sendFloodScoped(default_scope, pkt, delay_millis, _prefs.path_hash_mode + 1);
+    }
+  }
+  t->send_expiry = futureMillis(ALERT_ACK_EXPIRY_MILLIS);
+}
+
+void SensorMesh::alertIf(bool condition, Trigger& t, AlertPriority pri, const char* text) {
+  if (condition) {
+    if (!t.isTriggered() && num_alert_tasks < MAX_CONCURRENT_ALERTS) {
+      StrHelper::strncpy(t.text, text, sizeof(t.text));
+      t.pri = pri;
+      t.send_expiry = 0;  // signal that initial send is needed
+      t.attempt = 4;
+      t.curr_contact_idx = -1;  // start iterating thru contacts[]
+
+      alert_tasks[num_alert_tasks++] = &t;  // add to queue
+    }
+  } else {
+    if (t.isTriggered()) {
+      t.text[0] = 0;
+      // remove 't' from alert queue
+      int i = 0;
+      while (i < num_alert_tasks && alert_tasks[i] != &t) i++;
+
+      if (i < num_alert_tasks) {  // found,  now delete from array
+        num_alert_tasks--;
+        while (i < num_alert_tasks) {
+          alert_tasks[i] = alert_tasks[i + 1];
+          i++;
+        }
+      }
+    }
+  }
+}
+
+float SensorMesh::getAirtimeBudgetFactor() const {
+  return _prefs.airtime_factor;
+}
+
+bool SensorMesh::allowPacketForward(const mesh::Packet* packet) {
+  if (_prefs.disable_fwd) return false;
+  if (packet->isRouteFlood() && packet->getPathHashCount() >= _prefs.flood_max) return false;
+  return true;
+}
+
+int SensorMesh::calcRxDelay(float score, uint32_t air_time) const {
+  if (_prefs.rx_delay_base <= 0.0f) return 0;
+  return (int) ((pow(_prefs.rx_delay_base, 0.85f - score) - 1.0) * air_time);
+}
+
+uint32_t SensorMesh::getRetransmitDelay(const mesh::Packet* packet) {
+  uint32_t t = (_radio->getEstAirtimeFor(packet->getPathByteLen() + packet->payload_len + 2) * _prefs.tx_delay_factor);
+  return getRNG()->nextInt(0, 6)*t;
+}
+uint32_t SensorMesh::getDirectRetransmitDelay(const mesh::Packet* packet) {
+  uint32_t t = (_radio->getEstAirtimeFor(packet->getPathByteLen() + packet->payload_len + 2) * _prefs.direct_tx_delay_factor);
+  return getRNG()->nextInt(0, 6)*t;
+}
+int SensorMesh::getInterferenceThreshold() const {
+  return _prefs.interference_threshold;
+}
+bool SensorMesh::getCADEnabled() const {
+  return _prefs.cad_enabled;
+}
+int SensorMesh::getAGCResetInterval() const {
+  return ((int)_prefs.agc_reset_interval) * 4000;   // milliseconds
+}
+
+void SensorMesh::startRegionsLoad() {
+  temp_map.resetFrom(region_map);   // rebuild regions in a temp instance
+  memset(load_stack, 0, sizeof(load_stack));
+  load_stack[0] = &temp_map.getWildcard();
+  region_load_active = true;
+}
+
+bool SensorMesh::saveRegions() {
+  return region_map.save(_fs);
+}
+
+void SensorMesh::onDefaultRegionChanged(const RegionEntry* r) {
+  if (r) {
+    region_map.getTransportKeysFor(*r, &default_scope, 1);
+  } else {
+    memset(default_scope.key, 0, sizeof(default_scope.key));
+  }
+}
+
+uint8_t SensorMesh::handleLoginReq(const mesh::Identity& sender, const uint8_t* secret, uint32_t sender_timestamp, const uint8_t* data, bool is_flood) {
+  ClientInfo* client;
+  if (data[0] == 0) {   // blank password, just check if sender is in ACL
+    client = acl.getClient(sender.pub_key, PUB_KEY_SIZE);
+    if (client == NULL) {
+    #if MESH_DEBUG
+      MESH_DEBUG_PRINTLN("Login, sender not in ACL");
+    #endif
+      return 0;
+    }
+  } else {
+    if (strcmp((char *) data, _prefs.password) != 0) {  // check for valid admin password
+    #if MESH_DEBUG
+      MESH_DEBUG_PRINTLN("Invalid password: %s", &data[0]);
+    #endif
+      return 0;
+    }
+
+    client = acl.putClient(sender, PERM_RECV_ALERTS_HI | PERM_RECV_ALERTS_LO);  // add to contacts (if not already known)
+    if (sender_timestamp <= client->last_timestamp) {
+      MESH_DEBUG_PRINTLN("Possible login replay attack!");
+      return 0;  // FATAL: client table is full -OR- replay attack
+    }
+
+    MESH_DEBUG_PRINTLN("Login success!");
+    client->last_timestamp = sender_timestamp;
+    client->last_activity = getRTCClock()->getCurrentTime();
+    client->permissions |= PERM_ACL_ADMIN;
+    memcpy(client->shared_secret, secret, PUB_KEY_SIZE);
+
+    dirty_contacts_expiry = futureMillis(LAZY_CONTACTS_WRITE_DELAY);
+  }
+
+  if (is_flood) {
+    client->out_path_len = OUT_PATH_UNKNOWN;  // need to rediscover out_path
+  }
+
+  uint32_t now = getRTCClock()->getCurrentTimeUnique();
+  memcpy(reply_data, &now, 4);   // response packets always prefixed with timestamp
+  reply_data[4] = RESP_SERVER_LOGIN_OK;
+  reply_data[5] = 0;
+  reply_data[6] = client->isAdmin() ? 1 : 0;
+  reply_data[7] = client->permissions;
+  getRNG()->random(&reply_data[8], 4);   // random blob to help packet-hash uniqueness
+  reply_data[12] = FIRMWARE_VER_LEVEL;
+
+  return 13;  // reply length
+}
+
+void SensorMesh::handleCommand(ClientInfo* from, uint32_t sender_timestamp, char* command, char* reply) {
+  if (region_load_active) {
+    if (StrHelper::isBlank(command)) {  // empty/blank line, signal to terminate 'load' operation
+      region_map = temp_map;  // copy over the temp instance as new current map
+      region_load_active = false;
+
+      sprintf(reply, "OK - loaded %d regions", region_map.getCount());
+    } else {
+      char *np = command;
+      while (*np == ' ') np++;   // skip indent
+      int indent = np - command;
+
+      char *ep = np;
+      while (RegionMap::is_name_char(*ep)) ep++;
+      if (*ep) { *ep++ = 0; }  // set null terminator for end of name
+
+      while (*ep && *ep != 'F') ep++;  // look for (optional) flags
+
+      if (indent > 0 && indent < 8 && strlen(np) > 0) {
+        auto parent = load_stack[indent - 1];
+        if (parent) {
+          auto old = region_map.findByName(np);
+          auto nw = temp_map.putRegion(np, parent->id, old ? old->id : 0);  // carry-over the current ID (if name already exists)
+          if (nw) {
+            nw->flags = old ? old->flags : (*ep == 'F' ? 0 : REGION_DENY_FLOOD);   // carry-over flags from curr
+
+            load_stack[indent] = nw;  // keep pointers to parent regions, to resolve parent_id's
+          }
+        }
+      }
+      reply[0] = 0;
+    }
+    return;
+  }
+
+  while (*command == ' ') command++;   // skip leading spaces
+
+  if (strlen(command) > 4 && command[2] == '|') {  // optional prefix (for companion radio CLI)
+    memcpy(reply, command, 3);  // reflect the prefix back
+    reply += 3;
+    command += 3;
+  }
+
+  // first, see if this is a custom-handled CLI command (ie. in main.cpp)
+  if (handleCustomCommand(sender_timestamp, command, reply)) {
+    return;   // command has been handled
+  }
+
+  // handle sensor-specific CLI commands
+  if (memcmp(command, "setperm ", 8) == 0) {   // format:  setperm {pubkey-hex} {permissions-int8}
+    char* hex = &command[8];
+    char* sp = strchr(hex, ' ');   // look for separator char
+    if (sp == NULL) {
+      strcpy(reply, "Err - bad params");
+    } else {
+      int hex_len = min(sp - hex, PUB_KEY_SIZE*2);
+      uint8_t pubkey[PUB_KEY_SIZE];
+
+      *sp++ = 0;   // replace space with null terminator
+
+      if (mesh::Utils::fromHex(pubkey, hex_len / 2, hex)) {
+        uint8_t perms = atoi(sp);
+        if (acl.applyPermissions(self_id, pubkey, hex_len / 2, perms)) {
+          dirty_contacts_expiry = futureMillis(LAZY_CONTACTS_WRITE_DELAY);   // trigger acl.save()
+          strcpy(reply, "OK");
+        } else {
+          strcpy(reply, "Err - invalid params");
+        }
+      } else {
+        strcpy(reply, "Err - bad pubkey");
+      }
+    }
+  } else if (sender_timestamp == 0 && strcmp(command, "get acl") == 0) {
+    Serial.println("ACL:");
+    for (int i = 0; i < acl.getNumClients(); i++) {
+      auto c = acl.getClientByIdx(i);
+      if (c->permissions == 0) continue;  // skip deleted entries
+
+      Serial.printf("%02X ", c->permissions);
+      mesh::Utils::printHex(Serial, c->id.pub_key, PUB_KEY_SIZE);
+      Serial.printf("\n");
+    }
+    reply[0] = 0;
+  } else if (memcmp(command, "io ", 2) == 0) { // io {value}: write, io: read 
+    if (command[2] == ' ') { // it's a write
+      uint32_t val;
+      uint32_t g = board.getGpio();
+      if (command[3] == 'r') { // reset bits
+        sscanf(&command[4], "%x", &val);
+        val = g & ~val;    
+      } else if (command[3] == 's') { // set bits
+        sscanf(&command[4], "%x", &val);
+        val |= g;    
+      } else if (command[3] == 't') { // toggle bits
+        sscanf(&command[4], "%x", &val);
+        val ^= g;    
+      } else { // set value
+        sscanf(&command[3], "%x", &val);
+      }
+      board.setGpio(val);
+    }
+    sprintf(reply, "%x", board.getGpio());
+  } else{
+    _cli.handleCommand(sender_timestamp, command, reply);  // common CLI commands
+  }
+}
+
+mesh::DispatcherAction SensorMesh::onRecvPacket(mesh::Packet* pkt) {
+  if (pkt->getRouteType() == ROUTE_TYPE_TRANSPORT_FLOOD) {
+    recv_pkt_region = region_map.findMatch(pkt, REGION_DENY_FLOOD);
+  } else if (pkt->getRouteType() == ROUTE_TYPE_FLOOD) {
+    if (region_map.getWildcard().flags & REGION_DENY_FLOOD) {
+      recv_pkt_region = NULL;
+    } else {
+      recv_pkt_region =  &region_map.getWildcard();
+    }
+  } else {
+    recv_pkt_region = NULL;
+  }
+  return Mesh::onRecvPacket(pkt);
+}
+
+void SensorMesh::onAnonDataRecv(mesh::Packet* packet, const uint8_t* secret, const mesh::Identity& sender, uint8_t* data, size_t len) {
+  if (packet->getPayloadType() == PAYLOAD_TYPE_ANON_REQ) {  // received an initial request by a possible admin client (unknown at this stage)
+    uint32_t timestamp;
+    memcpy(&timestamp, data, 4);
+
+    data[len] = 0;  // ensure null terminator
+    uint8_t reply_len;
+    if (data[4] == 0 || data[4] >= ' ') {   // is password, ie. a login request
+      reply_len = handleLoginReq(sender, secret, timestamp, &data[4], packet->isRouteFlood());
+    //} else if (data[4] == ANON_REQ_TYPE_*) {   // future type codes
+      // TODO
+    } else {
+      reply_len = 0;  // unknown request type
+    }
+
+    if (reply_len == 0) return;   // invalid request
+
+    if (packet->isRouteFlood()) {
+      // let this sender know path TO here, so they can use sendDirect(), and ALSO encode the response
+      mesh::Packet* path = createPathReturn(sender, secret, packet->path, packet->path_len,
+                                            PAYLOAD_TYPE_RESPONSE, reply_data, reply_len);
+      if (path) sendFloodReply(path, SERVER_RESPONSE_DELAY, packet->getPathHashSize());
+    } else {
+      mesh::Packet* reply = createDatagram(PAYLOAD_TYPE_RESPONSE, sender, secret, reply_data, reply_len);
+      if (reply) sendFloodReply(reply, SERVER_RESPONSE_DELAY, packet->getPathHashSize());
+    }
+  }
+}
+
+int SensorMesh::searchPeersByHash(const uint8_t* hash) {
+  int n = 0;
+  for (int i = 0; i < acl.getNumClients() && n < MAX_SEARCH_RESULTS; i++) {
+    if (acl.getClientByIdx(i)->id.isHashMatch(hash)) {
+      matching_peer_indexes[n++] = i;  // store the INDEXES of matching contacts (for subsequent 'peer' methods)
+    }
+  }
+  return n;
+}
+
+void SensorMesh::getPeerSharedSecret(uint8_t* dest_secret, int peer_idx) {
+  int i = matching_peer_indexes[peer_idx];
+  if (i >= 0 && i < acl.getNumClients()) {
+    // lookup pre-calculated shared_secret
+    memcpy(dest_secret, acl.getClientByIdx(i)->shared_secret, PUB_KEY_SIZE);
+  } else {
+    MESH_DEBUG_PRINTLN("getPeerSharedSecret: Invalid peer idx: %d", i);
+  }
+}
+
+void SensorMesh::sendAckTo(const ClientInfo& dest, uint32_t ack_hash, uint8_t path_hash_size) {
+  if (dest.out_path_len == OUT_PATH_UNKNOWN) {
+    mesh::Packet* ack = createAck(ack_hash);
+    if (ack) sendFloodScoped(default_scope, ack, TXT_ACK_DELAY, path_hash_size);
+  } else {
+    uint32_t d = TXT_ACK_DELAY;
+    if (getExtraAckTransmitCount() > 0) {
+      mesh::Packet* a1 = createMultiAck(ack_hash, 1);
+      if (a1) sendDirect(a1, dest.out_path, dest.out_path_len, d);
+      d += 300;
+    }
+
+    mesh::Packet* a2 = createAck(ack_hash);
+    if (a2) sendDirect(a2, dest.out_path, dest.out_path_len, d);
+  }
+}
+
+void SensorMesh::onPeerDataRecv(mesh::Packet* packet, uint8_t type, int sender_idx, const uint8_t* secret, uint8_t* data, size_t len) {
+  int i = matching_peer_indexes[sender_idx];
+  if (i < 0 || i >= acl.getNumClients()) {
+    MESH_DEBUG_PRINTLN("onPeerDataRecv: Invalid sender idx: %d", i);
+    return;
+  }
+
+  ClientInfo* from = acl.getClientByIdx(i);
+
+  if (type == PAYLOAD_TYPE_REQ) {  // request (from a known contact)
+    uint32_t timestamp;
+    memcpy(&timestamp, data, 4);
+
+    if (timestamp > from->last_timestamp) {  // prevent replay attacks
+      uint8_t reply_len = handleRequest(from, timestamp, data[4], &data[5], len - 5);
+      if (reply_len == 0) return;  // invalid command
+
+      from->last_timestamp = timestamp;
+      from->last_activity = getRTCClock()->getCurrentTime();
+
+      if (packet->isRouteFlood()) {
+        // let this sender know path TO here, so they can use sendDirect(), and ALSO encode the response
+        mesh::Packet* path = createPathReturn(from->id, secret, packet->path, packet->path_len,
+                                              PAYLOAD_TYPE_RESPONSE, reply_data, reply_len);
+        if (path) sendFloodReply(path, SERVER_RESPONSE_DELAY, packet->getPathHashSize());
+      } else {
+        mesh::Packet* reply = createDatagram(PAYLOAD_TYPE_RESPONSE, from->id, secret, reply_data, reply_len);
+        if (reply) {
+          if (from->out_path_len != OUT_PATH_UNKNOWN) {  // we have an out_path, so send DIRECT
+            sendDirect(reply, from->out_path, from->out_path_len, SERVER_RESPONSE_DELAY);
+          } else {
+            sendFloodReply(reply, SERVER_RESPONSE_DELAY, packet->getPathHashSize());
+          }
+        }
+      }
+    } else {
+      MESH_DEBUG_PRINTLN("onPeerDataRecv: possible replay attack detected");
+    }
+  } else if (type == PAYLOAD_TYPE_TXT_MSG && len > 5 && from->isAdmin()) {   // a CLI command
+    uint32_t sender_timestamp;
+    memcpy(&sender_timestamp, data, 4);  // timestamp (by sender's RTC clock - which could be wrong)
+    uint8_t flags = (data[4] >> 2);   // message attempt number, and other flags
+
+    if (sender_timestamp > from->last_timestamp) {  // prevent replay attacks
+      if (flags == TXT_TYPE_PLAIN) {
+        bool handled = handleIncomingMsg(*from, sender_timestamp, &data[5], flags, len - 5);
+        if (handled) { // if msg was handled then send an ack
+          uint32_t ack_hash;    // calc truncated hash of the message timestamp + text + sender pub_key, to prove to sender that we got it
+          mesh::Utils::sha256((uint8_t *) &ack_hash, 4, data, 5 + strlen((char *)&data[5]), from->id.pub_key, PUB_KEY_SIZE);
+
+          if (packet->isRouteFlood()) {
+            // let this sender know path TO here, so they can use sendDirect(), and ALSO encode the ACK
+            mesh::Packet* path = createPathReturn(from->id, secret, packet->path, packet->path_len,
+                                                  PAYLOAD_TYPE_ACK, (uint8_t *) &ack_hash, 4);
+            if (path) sendFloodReply(path, TXT_ACK_DELAY, packet->getPathHashSize());
+          } else {
+            sendAckTo(*from, ack_hash, packet->getPathHashSize());
+          }
+        }
+      } else if (flags == TXT_TYPE_CLI_DATA || flags == TXT_TYPE_CLI_COMMAND) {
+        from->last_timestamp = sender_timestamp;
+        from->last_activity = getRTCClock()->getCurrentTime();
+
+        // len can be > original length, but 'text' will be padded with zeroes
+        data[len] = 0; // need to make a C string again, with null terminator
+
+        uint8_t temp[166];
+        char *command = (char *) &data[5];
+        char *reply = (char *) &temp[5];
+        handleCommand(from, sender_timestamp, command, reply);
+
+        int text_len = strlen(reply);
+        if (text_len > 0) {
+          uint32_t timestamp = getRTCClock()->getCurrentTimeUnique();
+          if (timestamp == sender_timestamp) {
+            // WORKAROUND: the two timestamps need to be different, in the CLI view
+            timestamp++;
+          }
+          memcpy(temp, &timestamp, 4);   // mostly an extra blob to help make packet_hash unique
+          temp[4] = (TXT_TYPE_CLI_DATA << 2);
+
+          auto reply = createDatagram(PAYLOAD_TYPE_TXT_MSG, from->id, secret, temp, 5 + text_len);
+          if (reply) {
+            if (from->out_path_len == OUT_PATH_UNKNOWN) {
+              sendFloodReply(reply, CLI_REPLY_DELAY_MILLIS, packet->getPathHashSize());
+            } else {
+              sendDirect(reply, from->out_path, from->out_path_len, CLI_REPLY_DELAY_MILLIS);
+            }
+          }
+        }
+      } else {
+        MESH_DEBUG_PRINTLN("onPeerDataRecv: unsupported text type received: flags=%02x", (uint32_t)flags);
+      }
+    } else {
+      MESH_DEBUG_PRINTLN("onPeerDataRecv: possible replay attack detected");
+    }
+  }
+}
+
+bool SensorMesh::handleIncomingMsg(ClientInfo& from, uint32_t timestamp, uint8_t* data, uint8_t flags, size_t len) {
+  MESH_DEBUG_PRINT("handleIncomingMsg: unhandled msg from ");
+  #ifdef MESH_DEBUG
+  mesh::Utils::printHex(Serial, from.id.pub_key, PUB_KEY_SIZE);
+  Serial.printf(": %s\n", data);
+  #endif
+  return false;
+}
+
+#define CTL_TYPE_NODE_DISCOVER_REQ   0x80
+#define CTL_TYPE_NODE_DISCOVER_RESP  0x90
+
+void SensorMesh::onControlDataRecv(mesh::Packet* packet) {
+  uint8_t type = packet->payload[0] & 0xF0;    // just test upper 4 bits
+  if (type == CTL_TYPE_NODE_DISCOVER_REQ && packet->payload_len >= 6) {
+    // TODO: apply rate limiting to these!
+    int i = 1;
+    uint8_t  filter = packet->payload[i++];
+    uint32_t tag;
+    memcpy(&tag, &packet->payload[i], 4); i += 4;
+    uint32_t since;
+    if (packet->payload_len >= i+4) {   // optional since field
+      memcpy(&since, &packet->payload[i], 4); i += 4;
+    } else {
+      since = 0;
+    }
+
+    if ((filter & (1 << ADV_TYPE_SENSOR)) != 0 && _prefs.discovery_mod_timestamp >= since) {
+      bool prefix_only = packet->payload[0] & 1;
+      uint8_t data[6 + PUB_KEY_SIZE];
+      data[0] = CTL_TYPE_NODE_DISCOVER_RESP | ADV_TYPE_SENSOR;   // low 4-bits for node type
+      data[1] = packet->_snr;   // let sender know the inbound SNR ( x 4)
+      memcpy(&data[2], &tag, 4);     // include tag from request, for client to match to
+      memcpy(&data[6], self_id.pub_key, PUB_KEY_SIZE);
+      auto resp = createControlData(data,  prefix_only ? 6 + 8 : 6 + PUB_KEY_SIZE);
+      if (resp) {
+        sendZeroHop(resp, getRetransmitDelay(resp)*4);  // apply random delay (widened x4), as multiple nodes can respond to this
+      }
+    }
+  }
+}
+
+bool SensorMesh::onPeerPathRecv(mesh::Packet* packet, int sender_idx, const uint8_t* secret, uint8_t* path, uint8_t path_len, uint8_t extra_type, uint8_t* extra, uint8_t extra_len) {
+  int i = matching_peer_indexes[sender_idx];
+  if (i < 0 || i >= acl.getNumClients()) {
+    MESH_DEBUG_PRINTLN("onPeerPathRecv: Invalid sender idx: %d", i);
+    return false;
+  }
+
+  ClientInfo* from = acl.getClientByIdx(i);
+
+  MESH_DEBUG_PRINTLN("PATH to contact, path_len=%d", (uint32_t) path_len);
+  // NOTE: for this impl, we just replace the current 'out_path' regardless, whenever sender sends us a new out_path.
+  // FUTURE: could store multiple out_paths per contact, and try to find which is the 'best'(?)
+  from->out_path_len = mesh::Packet::copyPath(from->out_path, path, path_len);  // store a copy of path, for sendDirect()
+  from->last_activity = getRTCClock()->getCurrentTime();
+
+  // REVISIT: maybe make ALL out_paths non-persisted to minimise flash writes??
+  if (from->isAdmin()) {
+    // only do saveContacts() (of this out_path change) if this is an admin
+    dirty_contacts_expiry = futureMillis(LAZY_CONTACTS_WRITE_DELAY);
+  }
+
+  // NOTE: no reciprocal path send!!
+  return false;
+}
+
+void SensorMesh::onAckRecv(mesh::Packet* packet, uint32_t ack_crc) {
+  if (num_alert_tasks > 0) {
+    auto t = alert_tasks[0];   // check current alert task
+    for (int i = 0; i < t->attempt; i++) {
+      if (ack_crc == t->expected_acks[i]) {   // matching ACK!
+        t->attempt = 4;  // signal to move to next contact
+        t->send_expiry = 0;
+        packet->markDoNotRetransmit();   // ACK was for this node, so don't retransmit
+        return;
+      }
+    }
+  }
+}
+
+SensorMesh::SensorMesh(mesh::MainBoard& board, mesh::Radio& radio, mesh::MillisecondClock& ms, mesh::RNG& rng, mesh::RTCClock& rtc, mesh::MeshTables& tables)
+     : mesh::Mesh(radio, ms, rng, rtc, *new StaticPoolPacketManager(32), tables),
+      region_map(key_store), temp_map(key_store),
+      _cli(board, rtc, sensors, region_map, acl, &_prefs, this),
+      telemetry(MAX_PACKET_PAYLOAD - 4)
+{
+  next_local_advert = next_flood_advert = 0;
+  dirty_contacts_expiry = 0;
+  last_read_time = 0;
+  num_alert_tasks = 0;
+  set_radio_at = revert_radio_at = 0;
+  recv_pkt_region = NULL;
+  region_load_active = false;
+
+  // defaults
+  _prefs.airtime_factor = 1.0;
+  _prefs.rx_delay_base =   0.0f;  // turn off by default, was 10.0;
+  _prefs.tx_delay_factor = 0.5f;   // was 0.25f
+  _prefs.direct_tx_delay_factor = 0.2f; // was zero
+  StrHelper::strncpy(_prefs.node_name, ADVERT_NAME, sizeof(_prefs.node_name));
+  _prefs.node_lat = ADVERT_LAT;
+  _prefs.node_lon = ADVERT_LON;
+  StrHelper::strncpy(_prefs.password, ADMIN_PASSWORD, sizeof(_prefs.password));
+  _prefs.freq = LORA_FREQ;
+  _prefs.sf = LORA_SF;
+  _prefs.bw = LORA_BW;
+  _prefs.cr = LORA_CR;
+  _prefs.tx_power_dbm = LORA_TX_POWER;
+  _prefs.advert_interval = 1;  // default to 2 minutes for NEW installs
+  _prefs.flood_advert_interval = 0;   // disabled
+  _prefs.disable_fwd = true;
+  _prefs.flood_max = 64;
+  _prefs.interference_threshold = 0;  // disabled
+  _prefs.cad_enabled = 0;             // hardware CAD before TX (off by default; 'set cad on')
+
+  // GPS defaults
+  _prefs.gps_enabled = 0;
+  _prefs.gps_interval = 0;
+  _prefs.advert_loc_policy = ADVERT_LOC_PREFS;
+  _prefs.radio_fem_rxgain = 1;
+  _prefs.radio_fem_txgain = 0;
+
+  memset(default_scope.key, 0, sizeof(default_scope.key));
+}
+
+void SensorMesh::begin(FILESYSTEM* fs) {
+  mesh::Mesh::begin();
+  _fs = fs;
+  // load persisted prefs
+  _cli.loadPrefs(_fs);
+
+  acl.load(_fs, self_id);
+  region_map.load(_fs);
+
+  // establish default-scope
+  {
+    RegionEntry* r = region_map.getDefaultRegion();
+    if (r) {
+      region_map.getTransportKeysFor(*r, &default_scope, 1);
+    } else {
+#ifdef DEFAULT_FLOOD_SCOPE_NAME
+      r = region_map.findByName(DEFAULT_FLOOD_SCOPE_NAME);
+      if (r == NULL) {
+        r = region_map.putRegion(DEFAULT_FLOOD_SCOPE_NAME, 0);  // auto-create the default scope region
+        if (r) { r->flags = 0; }   // Allow-flood
+      }
+      if (r) {
+        region_map.setDefaultRegion(r);
+        region_map.getTransportKeysFor(*r, &default_scope, 1);
+      }
+#endif
+    }
+  }
+
+  radio_driver.setParams(_prefs.freq, _prefs.bw, _prefs.sf, _prefs.cr);
+  radio_driver.setTxPower(_prefs.tx_power_dbm);
+
+  board.attachDynamicPrefs(_prefs.getCustom());
+
+  updateAdvertTimer();
+  updateFloodAdvertTimer();
+
+   board.setAdcMultiplier(_prefs.adc_multiplier);
+
+#if ENV_INCLUDE_GPS == 1
+  applyGpsPrefs();
+#endif
+}
+
+bool SensorMesh::formatFileSystem() {
+#if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
+    return InternalFS.format();
+#elif defined(RP2040_PLATFORM)
+    return LittleFS.format();
+#elif defined(ESP32)
+    return SPIFFS.format();
+#else
+    #error "need to implement file system erase"
+    return false;
+#endif
+}
+
+void SensorMesh::saveIdentity(const mesh::LocalIdentity& new_id) {
+#if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
+  IdentityStore store(*_fs, "");
+#elif defined(ESP32)
+  IdentityStore store(*_fs, "/identity");
+#elif defined(RP2040_PLATFORM)
+  IdentityStore store(*_fs, "/identity");
+#else
+  #error "need to define saveIdentity()"
+#endif
+  store.save("_main", new_id);
+}
+
+void SensorMesh::applyTempRadioParams(float freq, float bw, uint8_t sf, uint8_t cr, int timeout_mins) {
+  set_radio_at = futureMillis(2000);   // give CLI reply some time to be sent back, before applying temp radio params
+  pending_freq = freq;
+  pending_bw = bw;
+  pending_sf = sf;
+  pending_cr = cr;
+
+  revert_radio_at = futureMillis(2000 + timeout_mins*60*1000);   // schedule when to revert radio params
+}
+
+void SensorMesh::sendFloodScoped(const TransportKey& scope, mesh::Packet* pkt, uint32_t delay_millis, uint8_t path_hash_size) {
+  if (scope.isNull()) {
+    sendFlood(pkt, delay_millis, path_hash_size);
+  } else {
+    uint16_t codes[2];
+    codes[0] = scope.calcTransportCode(pkt);
+    codes[1] = 0;  // REVISIT: set to 'home' Region, for sender/return region?
+    sendFlood(pkt, codes, delay_millis, path_hash_size);
+  }
+}
+
+void SensorMesh::sendFloodReply(mesh::Packet* packet, unsigned long delay_millis, uint8_t path_hash_size) {
+  TransportKey req_scope;
+  bool is_wildcard = recv_pkt_region != NULL && recv_pkt_region->isWildcard();
+  bool req_scope_known = recv_pkt_region != NULL && !is_wildcard
+                      && region_map.getTransportKeysFor(*recv_pkt_region, &req_scope, 1) > 0;
+
+  switch (mesh::chooseReplyScope(req_scope_known, is_wildcard, !default_scope.isNull())) {
+    case mesh::REPLY_SCOPE_REQUEST:
+      sendFloodScoped(req_scope, packet, delay_millis, path_hash_size);   // reply with same scope as request
+      break;
+    case mesh::REPLY_SCOPE_DEFAULT:
+      // requester's scope is unknown: DIRECT request (no transport codes), or code matched no Region.
+      // un-scoped would be dropped at hop 0 by repeaters running flood.max.unscoped=0
+      sendFloodScoped(default_scope, packet, delay_millis, path_hash_size);
+      break;
+    case mesh::REPLY_SCOPE_NONE:
+      sendFlood(packet, delay_millis, path_hash_size);   // send un-scoped
+      break;
+  }
+}
+
+void SensorMesh::sendSelfAdvertisement(int delay_millis, bool flood) {
+  mesh::Packet* pkt = createSelfAdvert();
+  if (pkt) {
+    if (flood) {
+      sendFloodScoped(default_scope, pkt, delay_millis, _prefs.path_hash_mode + 1);
+    } else {
+      sendZeroHop(pkt, delay_millis);
+    }
+  } else {
+    MESH_DEBUG_PRINTLN("ERROR: unable to create advertisement packet!");
+  }
+}
+
+void SensorMesh::updateAdvertTimer() {
+  if (_prefs.advert_interval > 0) {  // schedule local advert timer
+    next_local_advert = futureMillis( ((uint32_t)_prefs.advert_interval) * 2 * 60 * 1000);
+  } else {
+    next_local_advert = 0;  // stop the timer
+  }
+}
+void SensorMesh::updateFloodAdvertTimer() {
+  if (_prefs.flood_advert_interval > 0) {  // schedule flood advert timer
+    next_flood_advert = futureMillis( ((uint32_t)_prefs.flood_advert_interval) * 60 * 60 * 1000);
+  } else {
+    next_flood_advert = 0;  // stop the timer
+  }
+}
+
+void SensorMesh::setTxPower(int8_t power_dbm) {
+  radio_driver.setTxPower(power_dbm);
+}
+
+void SensorMesh::formatStatsReply(char *reply) {
+  StatsFormatHelper::formatCoreStats(reply, board, *_ms, _err_flags, _mgr);
+}
+
+void SensorMesh::formatRadioStatsReply(char *reply) {
+  StatsFormatHelper::formatRadioStats(reply, _radio, radio_driver, getTotalAirTime(), getReceiveAirTime());
+}
+
+void SensorMesh::formatPacketStatsReply(char *reply) {
+  StatsFormatHelper::formatPacketStats(reply, radio_driver, getNumSentFlood(), getNumSentDirect(), 
+                                       getNumRecvFlood(), getNumRecvDirect());
+}
+
+float SensorMesh::getTelemValue(uint8_t channel, uint8_t type) {
+  return findTelemValue(telemetry.getBuffer(), telemetry.getSize(), channel, type, 0.0f);
+}
+
+bool  SensorMesh::getGPS(uint8_t channel, float& lat, float& lon, float& alt) {
+  if (channel == TELEM_CHANNEL_SELF) {
+    lat = sensors.node_lat;
+    lon = sensors.node_lon;
+    alt = sensors.node_altitude;
+    return true;
+  }
+  // REVISIT: custom GPS channels??
+  return false;
+}
+
+void SensorMesh::loop() {
+  mesh::Mesh::loop();
+
+  if (next_flood_advert && millisHasNowPassed(next_flood_advert)) {
+    mesh::Packet* pkt = createSelfAdvert();
+    unsigned long delay_millis = 0;
+    if (pkt) sendFloodScoped(default_scope, pkt, delay_millis, _prefs.path_hash_mode + 1);
+
+    updateFloodAdvertTimer();   // schedule next flood advert
+    updateAdvertTimer();   // also schedule local advert (so they don't overlap)
+  } else if (next_local_advert && millisHasNowPassed(next_local_advert)) {
+    mesh::Packet* pkt = createSelfAdvert();
+    if (pkt) sendZeroHop(pkt);
+
+    updateAdvertTimer();   // schedule next local advert
+  }
+
+  if (set_radio_at && millisHasNowPassed(set_radio_at)) {   // apply pending (temporary) radio params
+    set_radio_at = 0;  // clear timer
+    radio_driver.setParams(pending_freq, pending_bw, pending_sf, pending_cr);
+    MESH_DEBUG_PRINTLN("Temp radio params");
+  }
+
+  if (revert_radio_at && millisHasNowPassed(revert_radio_at)) {   // revert radio params to orig
+    revert_radio_at = 0;  // clear timer
+    radio_driver.setParams(_prefs.freq, _prefs.bw, _prefs.sf, _prefs.cr);
+    MESH_DEBUG_PRINTLN("Radio params restored");
+  }
+
+  uint32_t curr = getRTCClock()->getCurrentTime();
+  if (curr >= last_read_time + SENSOR_READ_INTERVAL_SECS) {
+    telemetry.reset();
+    telemetry.addVoltage(TELEM_CHANNEL_SELF, (float)board.getBattMilliVolts() / 1000.0f);
+    // query other sensors -- target specific
+    sensors.querySensors(0xFF, telemetry);  // allow all telemetry permissions
+  	// This MCU temperature will be overridden by external sensors (if any)
+    float temperature = board.getMCUTemperature();
+    if (!isnan(temperature)) {   // Supported boards with built-in temperature sensor. ESP32-C3 may return NAN
+      telemetry.addTemperature(TELEM_CHANNEL_SELF, temperature);    // Built-in MCU Temperature
+    }
+
+    // compare with previous telemetry, check if any deltas are greater than subscriber minimums
+    for (int i = 0; i < acl.getNumClients(); i++) {
+      auto c = acl.getClientByIdx(i);
+      if (c->permissions == 0 || c->extra.sensor.scope_region_id == 0 || c->extra.sensor.min_deltas_len == 0) continue;  // skip deleted entries, or Not subscribed to deltas
+      RegionEntry* r = region_map.findById(c->extra.sensor.scope_region_id);
+      if (r == NULL) continue;   // unknown region scope
+      if (curr > c->extra.sensor.expiry_timestamp) continue;  // subscription now expired
+      if (telemHasChanged(c)) {
+        TransportKey scope;
+        if (region_map.getTransportKeysFor(*r, &scope, 1) > 0) {
+          uint8_t tlen = telemetry.getSize();
+          memcpy(reply_data, &c->extra.sensor.push_tag, 4);
+          uint32_t timestamp = getRTCClock()->getCurrentTimeUnique();
+          memcpy(&reply_data[4], &timestamp, 4);
+          memcpy(&reply_data[8], telemetry.getBuffer(), tlen);
+
+          mesh::Packet* reply = createDatagram(PAYLOAD_TYPE_RESPONSE, c->id, c->shared_secret, reply_data, 8 + tlen);
+          if (reply) {
+            if (c->out_path_len != OUT_PATH_UNKNOWN) {  // we have an out_path, so send DIRECT
+              sendDirect(reply, c->out_path, c->out_path_len, 0);
+            } else {
+              sendFloodScoped(scope, reply, 0, _prefs.path_hash_mode + 1);
+            }
+          }
+        }
+      }
+    }
+
+    onSensorDataRead();
+
+    last_read_time = curr;
+  }
+
+  // check the alert send queue
+  if (num_alert_tasks > 0) {
+    auto t = alert_tasks[0];   // process head of queue
+
+    if (millisHasNowPassed(t->send_expiry)) {  // next send needed?
+      if (t->attempt >= 4) {  // max attempts reached, try next contact
+        t->curr_contact_idx++;
+        if (t->curr_contact_idx >= acl.getNumClients()) {  // no more contacts to try?
+          num_alert_tasks--;   // remove t from queue
+          for (int i = 0; i < num_alert_tasks; i++) {
+            alert_tasks[i] = alert_tasks[i + 1];
+          }
+        } else {
+          auto c = acl.getClientByIdx(t->curr_contact_idx);
+          uint16_t pri_mask = (t->pri == HIGH_PRI_ALERT) ? PERM_RECV_ALERTS_HI : PERM_RECV_ALERTS_LO;
+
+          if (c->permissions & pri_mask) {   // contact wants alert
+            // reset attempts
+            t->attempt = (t->pri == LOW_PRI_ALERT) ? 3 : 0;   // Low pri alerts, start at attempt #3 (ie. only make ONE attempt)
+            t->timestamp = getRTCClock()->getCurrentTimeUnique();   // need unique timestamp per contact
+
+            sendAlert(c, t);  // NOTE: modifies attempt, expected_acks[] and send_expiry
+          } else {
+            // next contact tested in next ::loop()
+          }
+        }
+      } else if (t->curr_contact_idx < acl.getNumClients()) {
+        auto c = acl.getClientByIdx(t->curr_contact_idx);   // send next attempt
+        sendAlert(c, t);  // NOTE: modifies attempt, expected_acks[] and send_expiry
+      } else {
+        // contact list has likely been modified while waiting for alert ACK, cancel this task
+        t->attempt = 4;   // next ::loop() will remove t from queue
+      }
+    }
+  }
+
+  // pending dirty contacts write needed?
+  if (dirty_contacts_expiry && millisHasNowPassed(dirty_contacts_expiry)) {
+    acl.save(_fs);
+    dirty_contacts_expiry = 0;
+  }
+}
