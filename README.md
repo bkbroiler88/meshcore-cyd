@@ -70,6 +70,33 @@ role; touch calibration, theme and inversion live in NVS and survive a plain ref
 - **Repeater settings** go through the repeater's own CLI (`set tx`, `set af`, ...), so the same
   range checks apply as over the air. Radio and node rows need BOOT held while tapping.
 
+## Offline map
+
+The companion UI has an offline raster-map screen (Settings > Map). It reads tiles from a
+microSD card in the slot that shares the radio's VSPI bus (`SDCARD_CS`, mounted through
+`cyd_vspi()`), so no network is needed on the device.
+
+Build a card with the vendored `tools/maptiles.py` (from the
+[Cairn](https://github.com/cvhviz/Cairn) fork, MIT). It needs Python 3; `build` and `verify`
+additionally need Pillow (`pip install pillow`).
+
+```
+python3 tools/maptiles.py presets                       # list the tile sources it may store offline
+python3 tools/maptiles.py estimate --center 35.0,-97.0 --radius-mi 10 --zoom 8-16
+python3 tools/maptiles.py build    --center 35.0,-97.0 --radius-mi 10 --zoom 8-16 --out E:/ --name okc-topo --title "OKC topo"
+python3 tools/maptiles.py verify   E:/Maps/okc-topo
+```
+
+`--out` is the root of the SD card. The script writes `/Maps/<name>/manifest.txt` and
+`/Maps/<name>/<z>/<bx>_<by>.l2t` tile blocks (P8RLE or RGB565, 256x256). The firmware scans
+`/Maps` at open, streams one tile row at a time (a few KB of working set plus the FAT mount),
+and frees it all when you leave the screen. Pan by dragging, and the node's own GPS position,
+when it has a fix, is drawn as an overlay. `tools/MAPTILES.md` documents the card layout and
+the on-disk formats in full.
+
+Only tile sources whose terms allow storing tiles offline are offered by `presets`; the large
+general-purpose tile services are deliberately excluded.
+
 ## Shared-code changes against upstream
 
 - `src/helpers/radiolib/RadioLibWrappers.cpp`: optional `LORA_PA_GAIN_DB` subtraction in `setTxPower`.
