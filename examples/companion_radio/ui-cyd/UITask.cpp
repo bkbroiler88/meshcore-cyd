@@ -1,4 +1,5 @@
 #include "UITask.h"
+#include "MapView.h"
 #include "ui_theme.h"
 #include "../MyMesh.h"
 #include "target.h"
@@ -129,6 +130,7 @@ void UITask::setScreen(Screen s) {
 #ifdef SPECTRUM_ANALYZER
   if (_screen == Screen::SPECTRUM && s != Screen::SPECTRUM) exitSpectrum();
 #endif
+  if (_screen == Screen::MAP && s != Screen::MAP) exitMap();
   _screen = s;
   _fullRedraw = true;
   _dirty = 0;
@@ -161,7 +163,7 @@ void UITask::shutdown(bool restart) {
   if (restart) {
     _board->reboot();
   } else {
-    if (_gfx) _gfx->fillScreen(TFT_BLACK);
+    if (_gfx) _gfx->fillScreen((uint16_t)0x0000);
     _board->powerOff();
   }
 }
@@ -861,7 +863,7 @@ void UITask::drawChat(bool full) {
 
 // ---------------------------------------------------------------- settings (finger-friendly list)
 
-enum : uint8_t { SID_TX = 1, SID_RXBOOST, SID_BT, SID_GPS, SID_TZ, SID_ADVERT, SID_SPECTRUM, SID_THEME, SID_INVERT, SID_RECAL, SID_HIBERNATE };
+enum : uint8_t { SID_TX = 1, SID_RXBOOST, SID_BT, SID_GPS, SID_TZ, SID_ADVERT, SID_SPECTRUM, SID_THEME, SID_INVERT, SID_RECAL, SID_HIBERNATE, SID_MAP };
 
 void UITask::fillSettings(bool rebuild) {
   char v[24];
@@ -879,6 +881,7 @@ void UITask::fillSettings(bool rebuild) {
 #endif
   snprintf(v, sizeof(v), "UTC%+d", (int)_prefs->tz_offset);          step(SID_TZ, "Time zone", v);
   btn(SID_ADVERT, "Send advert", "Send");
+  btn(SID_MAP, "Offline map", "Open");
 #ifdef SPECTRUM_ANALYZER
   btn(SID_SPECTRUM, "Spectrum analyser", "Open");
 #endif
@@ -911,6 +914,7 @@ void UITask::applySetting(uint8_t id, SetPart part) {
       break;
     }
     case SID_ADVERT: showAlert(the_mesh.advert() ? "Advert sent" : "Advert failed", 1200); break;
+    case SID_MAP: enterMap(); return;
 #ifdef SPECTRUM_ANALYZER
     case SID_SPECTRUM: enterSpectrum(); return;
 #endif
@@ -1114,6 +1118,140 @@ void UITask::drawSpectrum(bool full) {
 }
 #endif
 
+// ---------------------------------------------------------------- offline map
+
+#define MAP_BTN    40     // zoom / locate button size (320x240 units)
+#define MAP_MARGIN 6
+
+static void mapButtons(int* x, int* yIn, int* yOut, int* yMe) {
+  *x = GW - S(MAP_BTN + MAP_MARGIN);
+  *yOut = GH - S(MAP_BTN + MAP_MARGIN);
+  *yIn  = *yOut - S(MAP_BTN + 4);
+  *yMe  = *yIn - S(MAP_BTN + 12);
+}
+
+bool UITask::mapSelfPos(double* lat, double* lon) {
+#if ENV_INCLUDE_GPS
+  LocationProvider* lp = _sensors ? _sensors->getLocationProvider() : NULL;
+  if (getGPSState() && lp && lp->isValid()) {
+    *lat = lp->getLatitude() / 1e6; *lon = lp->getLongitude() / 1e6;
+    return true;
+  }
+#endif
+  if (_prefs->node_lat != 0 || _prefs->node_lon != 0) { *lat = _prefs->node_lat; *lon = _prefs->node_lon; return true; }
+  return false;
+}
+
+void UITask::enterMap() {
+  unsigned heap0 = ESP.getFreeHeap();
+  _map = new MapView(_gfx, S(L::STATUS_H), GH);
+  if (!_map->begin()) {
+    showAlert(_map->error(), 2000);
+    delete _map; _map = NULL;
+    return;
+  }
+  double lat, lon;
+  if (!mapSelfPos(&lat, &lon)) { _map->centerFromSets(&lat, &lon); _map->follow = false; }
+  _map->setCenter(lat, lon);
+  _map->zoomBy(0);
+  Serial.printf("map: %d sets, heap %u -> %u, largest %u\n", _map->setCount(), heap0, ESP.getFreeHeap(),
+    heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+  setScreen(Screen::MAP);
+}
+
+void UITask::exitMap() {
+  delete _map;
+  _map = NULL;
+}
+
+void UITask::drawMapHeader() {
+  LGFX_CYD* g = _gfx;
+  int h = S(L::STATUS_H);
+  g->fillRect(0, 0, GW, h, TH.bar);
+  txt(g, S(8), h / 2, "<", TH.accent, textdatum_t::middle_left);
+  txt(g, S(24), h / 2, "Map", TH.text, textdatum_t::middle_left);
+  const MapSet* m = _map->activeSet();
+  char r[40];
+  snprintf(r, sizeof(r), "%s  z%d", m ? m->title : _map->status(), _map->zoom());
+  txt(g, GW - S(8), h / 2, r, TH.muted, textdatum_t::middle_right, 1.0f, FONT_SMALL);
+}
+
+void UITask::drawMapOverlays() {
+  LGFX_CYD* g = _gfx;
+  int z = _map->zoom();
+  // contacts that advertise a position
+  int n = the_mesh.getNumContacts();
+  ContactInfo c;
+  for (int i = 0; i < n; i++) {
+    if (!the_mesh.getContactByIdx(i, c) || (c.gps_lat == 0 && c.gps_lon == 0)) continue;
+    int x, y;
+    if (!_map->project(c.gps_lat / 1e6, c.gps_lon / 1e6, &x, &y)) continue;
+    uint16_t col = c.type == ADV_TYPE_REPEATER ? TH.warn : (c.type == ADV_TYPE_ROOM ? TH.tilePurple : TH.ok);
+    g->fillCircle(x, y, S(4), col);
+    g->drawCircle(x, y, S(4), (uint16_t)0x0000);
+    if (z >= 11) {
+      g->setFont(FONT_SMALL); g->setTextDatum(textdatum_t::middle_left);
+      g->setTextColor((uint16_t)0x0000); g->drawString(c.name, x + S(7) + 1, y + 1);
+      g->setTextColor((uint16_t)0xFFFF); g->drawString(c.name, x + S(7), y);
+    }
+  }
+  // own position
+  double lat, lon;
+  int x, y;
+  if (mapSelfPos(&lat, &lon) && _map->project(lat, lon, &x, &y)) {
+    g->fillCircle(x, y, S(7), (uint16_t)0xFFFF);
+    g->fillCircle(x, y, S(5), TH.accent);
+  }
+  // message when there is nothing to draw here
+  if (_map->status()[0]) {
+    txt(g, GW / 2, (S(L::STATUS_H) + GH) / 2, _map->status(), (uint16_t)0xFFFF, textdatum_t::middle_center);
+  }
+  // buttons
+  int bx, yIn, yOut, yMe;
+  mapButtons(&bx, &yIn, &yOut, &yMe);
+  int b = S(MAP_BTN);
+  const char* lbl[3] = { "+", "-", "o" };
+  int ys[3] = { yIn, yOut, yMe };
+  for (int i = 0; i < 3; i++) {
+    bool on = (i == 2 && _map->follow);
+    g->fillRoundRect(bx, ys[i], b, b, S(6), on ? TH.accent : TH.bar);
+    g->drawRoundRect(bx, ys[i], b, b, S(6), TH.line);
+    txt(g, bx + b / 2, ys[i] + b / 2, lbl[i], on ? TH.bg : TH.text, textdatum_t::middle_center, 1.0f, FONT_BIG);
+  }
+  // attribution (required by the tile sources)
+  const MapSet* m = _map->activeSet();
+  if (m && m->attr[0]) {
+    g->setFont(FONT_SMALL);
+    int w = g->textWidth(m->attr) + S(6), h = g->fontHeight() + S(2);
+    g->fillRect(0, GH - h, w, h, TH.bar);
+    txt(g, S(3), GH - h / 2, m->attr, TH.muted, textdatum_t::middle_left, 1.0f, FONT_SMALL);
+  }
+}
+
+void UITask::drawMap(bool full) {
+  if (!_map) return;
+  if (full) { drawMapHeader(); _map->invalidate(); }
+  if (_map->step()) {
+    drawMapOverlays();
+    drawMapHeader();          // active set / zoom may have changed with the view
+  }
+  _dirty = 0;
+}
+
+// follow mode: recentre when our own position drifts off the middle of the view
+void UITask::mapTick() {
+  if (!_map || !_map->follow || _map->busy()) return;
+  double lat, lon;
+  int x, y;
+  if (!mapSelfPos(&lat, &lon)) return;
+  bool on = _map->project(lat, lon, &x, &y);
+  int my = (S(L::STATUS_H) + GH) / 2;
+  if (!on || abs(x - GW / 2) > S(16) || abs(y - my) > S(16)) {
+    _map->setCenter(lat, lon);
+    _map->invalidate();
+  }
+}
+
 // ---------------------------------------------------------------- input
 
 void UITask::pollTouch() {
@@ -1130,14 +1268,20 @@ void UITask::pollTouch() {
   }
   if (down && _tDown) {
     int dy = y - _tyLast;
-    if (!_tDragging && (abs(y - _ty0) > S(TAP_SLOP))) _tDragging = true;
-    if (_tDragging) { onDrag(dy); _txLast = x; _tyLast = y; }
+    bool mapPan = _screen == Screen::MAP && _map && _ty0 >= S(L::STATUS_H);
+    if (!_tDragging && (abs(y - _ty0) > S(TAP_SLOP) || (mapPan && abs(x - _tx0) > S(TAP_SLOP)))) _tDragging = true;
+    if (_tDragging) {
+      if (mapPan) _map->panBy(x - _txLast, dy);   // repainted on release
+      else onDrag(dy);
+      _txLast = x; _tyLast = y;
+    }
     else if (!_tLongFired && now - _tDownAt >= LONG_PRESS_MILLIS) { _tLongFired = true; onLongPress(_tx0, _ty0); }
     return;
   }
   if (!down && _tDown) {
     _tDown = false;
     _auto_off = now + AUTO_OFF_MILLIS;
+    if (_tDragging && _screen == Screen::MAP && _map) { _map->invalidate(); _dirty |= 1; }
     if (!_tDragging && !_tLongFired) onTap(_tx0, _ty0);
   }
 }
@@ -1185,7 +1329,7 @@ void UITask::onTap(int x, int y) {
   if (_screen == Screen::SPLASH) { setScreen(Screen::HOME); return; }
 
   // bottom tab bar (all screens except chat)
-  if (_screen != Screen::CHAT && y >= (GH - S(L::TAB_H))) {
+  if (_screen != Screen::CHAT && _screen != Screen::MAP && y >= (GH - S(L::TAB_H))) {
     int t = x / (GW / 5);
     Screen tabs[5] = { Screen::HOME, Screen::CONTACTS, Screen::CHANNELS, Screen::STATS, Screen::SETTINGS };
     if (t >= 0 && t < 5 && tabs[t] != _screen) setScreen(tabs[t]);
@@ -1251,6 +1395,22 @@ void UITask::onTap(int x, int y) {
       break;
     }
 #endif
+    case Screen::MAP: {
+      if (!_map) break;
+      if (y < S(L::STATUS_H)) { if (x < S(70)) setScreen(Screen::SETTINGS); break; }
+      int bx, yIn, yOut, yMe, b = S(MAP_BTN);
+      mapButtons(&bx, &yIn, &yOut, &yMe);
+      if (x < bx - S(4)) break;
+      if (y >= yIn && y < yIn + b) _map->zoomBy(1);
+      else if (y >= yOut && y < yOut + b) _map->zoomBy(-1);
+      else if (y >= yMe && y < yMe + b) {
+        double lat, lon;
+        if (mapSelfPos(&lat, &lon)) { _map->follow = true; _map->setCenter(lat, lon); }
+        else { showAlert("No position yet", 1500); break; }
+      } else break;
+      _map->invalidate(); _dirty |= 1;
+      break;
+    }
     case Screen::CHAT: {
       if (y < S(L::STATUS_H)) {
         if (x < S(60)) setScreen(_convos[_chatConvo].isChannel ? Screen::CHANNELS : Screen::CONTACTS);
@@ -1315,7 +1475,8 @@ void UITask::loop() {
 
   if (now >= _next_tick) {
     _next_tick = now + TICK_MILLIS;
-    if (_display->isOn() && !_fullRedraw && _screen != Screen::SPLASH && _screen != Screen::SPECTRUM && !_alert_expiry) drawStatusBar(false);
+    if (_display->isOn() && !_fullRedraw && _screen != Screen::SPLASH && _screen != Screen::SPECTRUM && _screen != Screen::MAP && !_alert_expiry) drawStatusBar(false);
+    if (_screen == Screen::MAP && (now / TICK_MILLIS) % 5 == 0) mapTick();
     if (_screen == Screen::HOME && (now / TICK_MILLIS) % 2 == 0) _dirty |= D_TILES | D_LASTHEARD;
     if ((_screen == Screen::SETTINGS || _screen == Screen::STATS) && (now / TICK_MILLIS) % 3 == 0) _dirty |= D_LIST;
 #ifdef UI_HEAP_LOG
@@ -1343,9 +1504,12 @@ void UITask::loop() {
     if (_alertShown && _display->isOn()) {
       _alertShown = false;
       if (_screen == Screen::SPECTRUM) _fullRedraw = true;   // custom header; rare
+      else if (_screen == Screen::MAP) { if (_map) drawMapHeader(); }
       else if (_screen != Screen::SPLASH) drawStatusBar(true);
     }
   }
+
+  if (_screen == Screen::MAP && _map && _map->busy()) _dirty |= 1;   // one tile per pass
 
   if (_display->isOn() && (_fullRedraw || _dirty)) {
     bool full = _fullRedraw;
@@ -1361,6 +1525,7 @@ void UITask::loop() {
 #ifdef SPECTRUM_ANALYZER
       case Screen::SPECTRUM: drawSpectrum(full); _dirty = 0; break;
 #endif
+      case Screen::MAP:      drawMap(full); break;
       default: _dirty = 0; break;
     }
     if (_alert_expiry && now < _alert_expiry && full) drawAlert();

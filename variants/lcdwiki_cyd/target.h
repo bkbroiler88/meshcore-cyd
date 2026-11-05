@@ -34,4 +34,5 @@ extern AutoDiscoverRTCClock rtc_clock;
 #endif
 
 bool radio_init();
+SPIClass& cyd_vspi();   // E22 + SD slot bus
 mesh::LocalIdentity radio_new_identity();

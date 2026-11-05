@@ -10,6 +10,7 @@ ESP32Board board;
 // is the LCD + touch bus on these boards. The E22 and the SD slot share VSPI (18/19/23).
 static SPIClass spi(VSPI);
 RADIO_CLASS radio = new Module(P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY, spi);
+SPIClass& cyd_vspi() { return spi; }
 
 WRAPPER_CLASS radio_driver(radio, board);
 

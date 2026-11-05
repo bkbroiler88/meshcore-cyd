@@ -53,7 +53,9 @@ struct UiConvo {
   const UiMsg* at(int i) const;   // 0 = oldest
 };
 
-enum class Screen : uint8_t { SPLASH, HOME, CONTACTS, CHANNELS, CHAT, STATS, SETTINGS, SPECTRUM };
+enum class Screen : uint8_t { SPLASH, HOME, CONTACTS, CHANNELS, CHAT, STATS, SETTINGS, SPECTRUM, MAP };
+
+class MapView;
 
 class UITask : public AbstractUITask {
   CYDDisplay* _display;
@@ -122,6 +124,16 @@ class UITask : public AbstractUITask {
   void spectrumStep();
   void drawSpectrum(bool full);
 #endif
+  // offline map: everything lives in the heap object while the screen is open
+  MapView* _map = NULL;
+  void enterMap();
+  void exitMap();
+  void drawMap(bool full);
+  void drawMapHeader();
+  void drawMapOverlays();
+  bool mapSelfPos(double* lat, double* lon);
+  void mapTick();
+
   void loadTheme();
   void saveTheme();
 
