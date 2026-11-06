@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MeshCore CYD flasher</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: system-ui, sans-serif; max-width: 640px; margin: 2rem auto; padding: 0 1rem;
+         line-height: 1.5; }
+  h1 { font-size: 1.4rem; }
+  select, button { font-size: 1rem; padding: 0.4rem 0.6rem; }
+  .row { margin: 1.2rem 0; }
+  .muted { opacity: 0.7; font-size: 0.9rem; }
+  code { background: rgba(127,127,127,0.18); padding: 0.1em 0.35em; border-radius: 4px; }
+  esp-web-install-button { --esp-tools-button-color: #0c6cc4; }
+  .warn { border-left: 3px solid #c08000; padding-left: 0.8rem; }
+</style>
+</head>
+<body>
+<h1>MeshCore CYD flasher</h1>
+<p>Flash a <a href="https://github.com/bkbroiler88/meshcore-cyd">MeshCore CYD</a> colour-UI
+build straight from the browser. Use desktop <strong>Chrome</strong> or <strong>Edge</strong>
+(Web Serial); Firefox and Safari are not supported.</p>
+
+<div class="row">
+  <label for="board">Board and role:</label><br>
+  <select id="board">
+    <option value="cyd28-companion">LCDWIKI 2.8" (ST7789) - companion / chat UI</option>
+    <option value="cyd35-companion">LCDWIKI 3.5" (ST7796) - companion / chat UI</option>
+    <option value="cyd28-repeater">LCDWIKI 2.8" (ST7789) - repeater</option>
+    <option value="cyd35-repeater">LCDWIKI 3.5" (ST7796) - repeater</option>
+  </select>
+</div>
+
+<div class="row">
+  <esp-web-install-button id="btn" manifest="manifests/cyd28-companion.json">
+    <button slot="activate">Connect and install</button>
+    <span slot="unsupported">Your browser can't do Web Serial - use Chrome or Edge on a desktop.</span>
+    <span slot="not-allowed">Serial access was blocked - allow it and retry.</span>
+  </esp-web-install-button>
+</div>
+
+<p class="muted">The installer erases the chip first, so touch calibration and the node
+identity are reset. On first boot the device shows the touch-calibration screen - tap the four
+corner markers.</p>
+
+<div class="row warn muted">
+  <strong>Changing a board's role</strong> (companion &harr; repeater) is a full erase - fine
+  here, the installer already erases. Powering the board from a PC USB port while it transmits
+  at 30 dBm can brown the port out; a powered hub or external 5 V is steadier.
+</div>
+
+<p class="muted">Images come from <code>dist/</code> in the repo. Prefer a cable and a flashing
+tool you trust? Every image is also a plain <code>esptool write_flash 0x0 &lt;file&gt;</code>.</p>
+
+<script type="module"
+  src="https://unpkg.com/esp-web-tools@10.0.3/dist/web/install-button.js?module"></script>
+<script>
+  const sel = document.getElementById('board');
+  const btn = document.getElementById('btn');
+  sel.addEventListener('change', () => { btn.manifest = `manifests/${sel.value}.json`; });
+</script>
+</body>
+</html>

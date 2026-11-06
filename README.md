@@ -49,7 +49,10 @@ pio run -e LCDWIKI_35_cyd_ble -t upload --upload-port COM3
 pio run -e LCDWIKI_35_cyd_ble -t mergebin      # single image for a flasher, .pio/build/<env>/firmware-merged.bin
 ```
 
-Ready-made merged images (flash at 0x0) are in `dist/`. Erase the flash when changing a board's
+Ready-made merged images (flash at 0x0) are in `dist/`. A browser flasher (Chrome or Edge,
+Web Serial) lives in `flasher/`: enable GitHub Pages for this repo (Settings > Pages, branch
+`main`, folder `/root`) and open `https://<user>.github.io/meshcore-cyd/flasher/`. It installs
+any of the four images straight to the board over USB. Erase the flash when changing a board's
 role; touch calibration, theme and inversion live in NVS and survive a plain reflash.
 
 ## What is in the port

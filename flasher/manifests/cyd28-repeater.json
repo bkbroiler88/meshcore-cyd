@@ -1,0 +1,16 @@
+{
+  "name": "LCDWIKI 2.8in repeater",
+  "version": "cyd",
+  "new_install_prompt_erase": true,
+  "builds": [
+    {
+      "chipFamily": "ESP32",
+      "parts": [
+        {
+          "path": "../../dist/meshcore-cyd28-st7789-repeater-cyd-ui-merged.bin",
+          "offset": 0
+        }
+      ]
+    }
+  ]
+}

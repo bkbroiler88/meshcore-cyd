@@ -1,0 +1,16 @@
+{
+  "name": "LCDWIKI 3.5in companion (chat UI)",
+  "version": "cyd",
+  "new_install_prompt_erase": true,
+  "builds": [
+    {
+      "chipFamily": "ESP32",
+      "parts": [
+        {
+          "path": "../../dist/meshcore-cyd35-cyd-ui-ble-merged.bin",
+          "offset": 0
+        }
+      ]
+    }
+  ]
+}
