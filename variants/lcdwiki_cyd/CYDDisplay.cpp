@@ -6,7 +6,8 @@
 #endif
 
 static const char* kCalNamespace = "touchcal";
-static const char* kCalKey = "cal_ls";   // landscape; a portrait option would use "cal_pt"
+static const char* kCalKeyNorm = "cal_ls";     // normal landscape
+static const char* kCalKeyFlip = "cal_ls180";  // 180-flipped landscape
 
 void CYDDisplay::loadInversion() {
   Preferences p;
@@ -15,6 +16,19 @@ void CYDDisplay::loadInversion() {
     p.end();
   }
   disp.invertDisplay(_inverted);
+}
+
+void CYDDisplay::loadRotation() {
+  Preferences p;
+  if (p.begin("uicyd", true)) { _rot = p.getUChar("rot", 0) ? 1 : 0; p.end(); }
+}
+
+void CYDDisplay::setRotated(bool on) {
+  _rot = on ? 1 : 0;
+  { Preferences p; if (p.begin("uicyd", false)) { p.putUChar("rot", _rot); p.end(); } }
+  disp.setRotation(_rot ? 3 : 1);
+  // calibration is orientation-specific; load this orientation's, or run it if none stored
+  touchCalibrate(false);
 }
 
 void CYDDisplay::setInverted(bool on, bool save) {
@@ -29,7 +43,8 @@ void CYDDisplay::setInverted(bool on, bool save) {
 #ifdef UI_CYD
 bool CYDDisplay::begin() {
   disp.init();
-  disp.setRotation(1);
+  loadRotation();
+  disp.setRotation(_rot ? 3 : 1);
   disp.setColorDepth(16);
   disp.setBrightness(200);
   loadInversion();
@@ -73,7 +88,7 @@ bool CYDDisplay::begin() {
 bool CYDDisplay::loadCalibration(uint16_t cal[8]) {
   Preferences p;
   if (!p.begin(kCalNamespace, true)) return false;
-  size_t got = p.getBytes(kCalKey, cal, sizeof(uint16_t) * 8);
+  size_t got = p.getBytes(_rot ? kCalKeyFlip : kCalKeyNorm, cal, sizeof(uint16_t) * 8);
   p.end();
   return got == sizeof(uint16_t) * 8;
 }
@@ -81,7 +96,7 @@ bool CYDDisplay::loadCalibration(uint16_t cal[8]) {
 void CYDDisplay::saveCalibration(const uint16_t cal[8]) {
   Preferences p;
   if (p.begin(kCalNamespace, false)) {
-    p.putBytes(kCalKey, cal, sizeof(uint16_t) * 8);
+    p.putBytes(_rot ? kCalKeyFlip : kCalKeyNorm, cal, sizeof(uint16_t) * 8);
     p.end();
   }
 }

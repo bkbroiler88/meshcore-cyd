@@ -240,7 +240,7 @@ void UITask::onACKRecv(uint32_t ack_crc) {
 
 void UITask::rebuildContactList() {
   _contactCount = 0;
-  uint32_t mods[64];
+  uint32_t mods[UI_MAX_CONTACT_ROWS];   // sorted scratch; stack-local (640 B at MAX_CONTACTS 160)
   int total = the_mesh.getTotalContactSlots();
   ContactInfo tmp;
   for (int idx = MAX_ANON_CONTACTS; idx < total; idx++) {
@@ -250,12 +250,12 @@ void UITask::rebuildContactList() {
     // insertion into descending-lastmod array, capped at 64
     int pos = _contactCount;
     while (pos > 0 && mods[pos - 1] < m) pos--;
-    if (pos >= 64) continue;
-    int end = (_contactCount < 64) ? _contactCount : 63;
+    if (pos >= UI_MAX_CONTACT_ROWS) continue;
+    int end = (_contactCount < UI_MAX_CONTACT_ROWS) ? _contactCount : (UI_MAX_CONTACT_ROWS - 1);
     for (int j = end; j > pos; j--) { mods[j] = mods[j - 1]; _contactIdx[j] = _contactIdx[j - 1]; }
     mods[pos] = m;
     _contactIdx[pos] = (uint16_t)idx;
-    if (_contactCount < 64) _contactCount++;
+    if (_contactCount < UI_MAX_CONTACT_ROWS) _contactCount++;
   }
 }
 
@@ -579,7 +579,8 @@ void UITask::drawTabBar() {
     txt(g, i * cw + cw / 2, cy, names[i], sel ? TH.accent : TH.muted, textdatum_t::middle_center, 1.0f, FONT_SMALL);
     if (sel) g->fillRect(i * cw + cw / 8, y + S(L::TAB_H - 3), cw * 3 / 4, S(2), TH.accent);
   }
-  if (totalUnread() > 0) g->fillCircle(cw + cw / 2 + S(22), cy - S(7), S(4), TH.danger);
+  // unread dot in the top-right corner of the Contacts tab (tab 1), clear of the label text
+  if (totalUnread() > 0) g->fillCircle(2 * cw - S(9), y + S(6), S(4), TH.danger);
 }
 
 void UITask::drawAlert() {
@@ -863,7 +864,11 @@ void UITask::drawChat(bool full) {
 
 // ---------------------------------------------------------------- settings (finger-friendly list)
 
-enum : uint8_t { SID_TX = 1, SID_RXBOOST, SID_BT, SID_GPS, SID_TZ, SID_ADVERT, SID_SPECTRUM, SID_THEME, SID_INVERT, SID_RECAL, SID_HIBERNATE, SID_MAP };
+enum : uint8_t { SID_TX = 1, SID_RXBOOST, SID_BT, SID_GPS, SID_TZ, SID_ADVERT, SID_ROTATE, SID_SPECTRUM, SID_THEME, SID_INVERT, SID_FLIP, SID_RECAL, SID_HIBERNATE, SID_MAP };
+
+// mirrors AUTO_ADD_OVERWRITE_OLDEST in MyMesh.cpp: when the contact store is full, overwrite
+// the oldest non-favourite contact (by last-heard) instead of rejecting the new one.
+#define UI_AUTOADD_OVERWRITE_OLDEST 0x01
 
 void UITask::fillSettings(bool rebuild) {
   char v[24];
@@ -881,6 +886,7 @@ void UITask::fillSettings(bool rebuild) {
 #endif
   snprintf(v, sizeof(v), "UTC%+d", (int)_prefs->tz_offset);          step(SID_TZ, "Time zone", v);
   btn(SID_ADVERT, "Send advert", "Send");
+  btn(SID_ROTATE, "Rotate contacts when full", (_prefs->autoadd_config & UI_AUTOADD_OVERWRITE_OLDEST) ? "on" : "off");
   btn(SID_MAP, "Offline map", "Open");
 #ifdef SPECTRUM_ANALYZER
   btn(SID_SPECTRUM, "Spectrum analyser", "Open");
@@ -888,6 +894,7 @@ void UITask::fillSettings(bool rebuild) {
   if (rebuild) L_.header("display");
   btn(SID_THEME, "Theme", TH.name);
   btn(SID_INVERT, "Invert colours", _display->inverted() ? "on" : "off");
+  btn(SID_FLIP, "Flip display 180", _display->rotated() ? "on" : "off");
   btn(SID_RECAL, "Recalibrate touch", "Start");
   if (rebuild) L_.header("power");
   btn(SID_HIBERNATE, "Hibernate", _confirmHibernate ? "Confirm" : "Sleep", true);
@@ -914,12 +921,17 @@ void UITask::applySetting(uint8_t id, SetPart part) {
       break;
     }
     case SID_ADVERT: showAlert(the_mesh.advert() ? "Advert sent" : "Advert failed", 1200); break;
+    case SID_ROTATE:
+      _prefs->autoadd_config ^= UI_AUTOADD_OVERWRITE_OLDEST;
+      the_mesh.savePrefs();
+      break;
     case SID_MAP: enterMap(); return;
 #ifdef SPECTRUM_ANALYZER
     case SID_SPECTRUM: enterSpectrum(); return;
 #endif
     case SID_THEME: _themeIdx = (_themeIdx + 1) % THEME_COUNT; g_theme = &THEMES[_themeIdx]; saveTheme(); _fullRedraw = true; return;
     case SID_INVERT: _display->setInverted(!_display->inverted()); break;
+    case SID_FLIP: _display->setRotated(!_display->rotated()); _fullRedraw = true; return;
     case SID_RECAL: _display->touchCalibrate(true); _fullRedraw = true; return;
     case SID_HIBERNATE: if (_confirmHibernate) shutdown(); _confirmHibernate = true; break;
     default: break;

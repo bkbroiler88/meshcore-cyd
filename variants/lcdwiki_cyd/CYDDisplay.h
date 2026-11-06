@@ -113,6 +113,7 @@ class CYDDisplay : public LGFXDisplay {
   LGFX_CYD disp;
   bool _calibrated = false;
   bool _inverted = (CYD_PANEL_INVERT != 0);
+  uint8_t _rot = 0;   // 0 = normal (setRotation 1), 1 = flipped 180 (setRotation 3)
 
   bool loadCalibration(uint16_t cal[8]);
   void saveCalibration(const uint16_t cal[8]);
@@ -150,6 +151,12 @@ public:
   bool inverted() const { return _inverted; }
   void setInverted(bool on, bool save = true);
   void loadInversion();
+
+  // 180-degree display flip (both landscape orientations). Each orientation keeps its own
+  // touch calibration (separate NVS key), so flipping re-uses or re-runs calibration as needed.
+  bool rotated() const { return _rot != 0; }
+  void setRotated(bool on);
+  void loadRotation();
 
   // Calibrated touch in LOGICAL (UI_ZOOM-divided) coordinates. False when not touched.
   bool touched(int* x, int* y);

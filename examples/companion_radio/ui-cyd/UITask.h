@@ -86,7 +86,11 @@ class UITask : public AbstractUITask {
 
   // lists
   int _listScroll = 0;
-  uint16_t _contactIdx[64];     // sorted contact slot indexes (most recent first)
+#ifndef MAX_CONTACTS
+  #define MAX_CONTACTS 100
+#endif
+#define UI_MAX_CONTACT_ROWS MAX_CONTACTS
+  uint16_t _contactIdx[UI_MAX_CONTACT_ROWS];   // sorted contact slot indexes (most recent first)
   int _contactCount = 0;
   uint8_t _channelIdx[16];
   int _channelCount = 0;
