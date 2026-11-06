@@ -8,6 +8,8 @@ Module I used in this build is here: https://wirelesswizard.net/ols/products/bkb
 **Flash it in the browser:** [bkbroiler88.github.io/meshcore-cyd/flasher](https://bkbroiler88.github.io/meshcore-cyd/flasher/)
 (desktop Chrome or Edge, Web Serial). Pick a board and role, plug in over USB, install.
 
+See [CHANGELOG.md](CHANGELOG.md) for what changed and when.
+
 Based on [meshcore-dev/meshcore](https://github.com/meshcore-dev/meshcore) at `81dbae5`
 (2026-10-15). This repository is maintained independently; it is a snapshot plus the changes
 below, not a fork with upstream history.
@@ -64,9 +66,13 @@ in NVS and survive a plain reflash.
   LovyanGFX panel + touch, 4-point touch calibration stored in NVS (hold BOOT or press the screen at
   boot to redo it), runtime colour inversion, VSPI pinned for the radio.
 - **Colour UI** for the companion: home tiles, contacts, channels, chat with on-screen keyboard and
-  delivery ticks, stats, settings. Repeater: status with airtime budget, neighbours, stats, settings.
-  Both: five themes, spectrum analyser (sweeps the band with the SX1262 while the mesh is held),
-  finger-sized settings rows (stepper or button per row), heap counter in the status bar.
+  delivery ticks, stats, settings, and an offline SD map (see below). Repeater: status with airtime
+  budget, neighbours, stats, settings. Both: five themes, spectrum analyser (sweeps the band with the
+  SX1262 while the mesh is held), finger-sized settings rows (stepper or button per row), heap counter
+  in the status bar, 180-degree display flip, and runtime colour inversion.
+- **Contacts**: the list shows all stored contacts (store holds up to `MAX_CONTACTS`, 160 on these
+  boards). *Rotate contacts when full* in Settings replaces the oldest non-favourite node instead of
+  rejecting new ones, so a mobile node keeps a rolling window of the most-recently-heard peers.
 - **Dual core**: mesh, serial interfaces, sensors and clock on core 0; UI on core 1; one recursive
   mutex between them. Listener callbacks only set state.
 - **PA gain**: `LORA_PA_GAIN_DB=10` makes every reported power an antenna figure. The app shows and
