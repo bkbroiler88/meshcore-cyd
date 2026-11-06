@@ -5,6 +5,9 @@ Ebyte E22-900M30S (SX1262 + 1 W PA), with a colour touch UI drawn straight on th
 
 Module I used in this build is here: https://wirelesswizard.net/ols/products/bkbroiler-mesh-v1-pre-order
 
+**Flash it in the browser:** [bkbroiler88.github.io/meshcore-cyd/flasher](https://bkbroiler88.github.io/meshcore-cyd/flasher/)
+(desktop Chrome or Edge, Web Serial). Pick a board and role, plug in over USB, install.
+
 Based on [meshcore-dev/meshcore](https://github.com/meshcore-dev/meshcore) at `81dbae5`
 (2026-10-15). This repository is maintained independently; it is a snapshot plus the changes
 below, not a fork with upstream history.
@@ -49,11 +52,11 @@ pio run -e LCDWIKI_35_cyd_ble -t upload --upload-port COM3
 pio run -e LCDWIKI_35_cyd_ble -t mergebin      # single image for a flasher, .pio/build/<env>/firmware-merged.bin
 ```
 
-Ready-made merged images (flash at 0x0) are in `dist/`. A browser flasher (Chrome or Edge,
-Web Serial) lives in `flasher/`: enable GitHub Pages for this repo (Settings > Pages, branch
-`main`, folder `/root`) and open `https://<user>.github.io/meshcore-cyd/flasher/`. It installs
-any of the four images straight to the board over USB. Erase the flash when changing a board's
-role; touch calibration, theme and inversion live in NVS and survive a plain reflash.
+Ready-made merged images (flash at 0x0) are in `dist/`. The easiest way to install one is the
+browser flasher at [bkbroiler88.github.io/meshcore-cyd/flasher](https://bkbroiler88.github.io/meshcore-cyd/flasher/)
+(desktop Chrome or Edge; the page source is `flasher/`). It installs any of the four images over
+USB. Erase the flash when changing a board's role; touch calibration, theme and inversion live
+in NVS and survive a plain reflash.
 
 ## What is in the port
 
