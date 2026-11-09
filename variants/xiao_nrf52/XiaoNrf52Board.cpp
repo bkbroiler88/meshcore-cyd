@@ -63,7 +63,30 @@ void XiaoNrf52Board::begin() {
   delay(10);  // Give sx1262 some time to power up
 }
 
+#ifdef BATT_MAX17048
+// MAX17048 fuel gauge (fixed I2C 0x36) on the main Wire bus. Registers are
+// big-endian; VCELL (0x02) is 78.125 uV/LSB. Boards that feed the XIAO through
+// its 3V3 pin (BKBroiler Mesh V2.1) leave the on-module VBAT divider unpowered,
+// so the gauge is the only real battery reading there.
+static bool max17048_read(uint8_t reg, uint16_t& v) {
+  Wire.beginTransmission(0x36);
+  Wire.write(reg);
+  if (Wire.endTransmission(false) != 0) return false;
+  if (Wire.requestFrom((uint8_t)0x36, (uint8_t)2) != 2) return false;
+  v = (uint16_t)Wire.read() << 8;
+  v |= (uint16_t)Wire.read();
+  return true;
+}
+#endif
+
 uint16_t XiaoNrf52Board::getBattMilliVolts() {
+#ifdef BATT_MAX17048
+  uint16_t vcell;
+  if (max17048_read(0x02, vcell)) {
+    return (uint32_t)vcell * 5 / 64;   // 78.125 uV/LSB == 5/64 mV
+  }
+  // gauge absent / no ACK: fall through to the XIAO's own divider
+#endif
   // https://wiki.seeedstudio.com/XIAO_BLE#q3-what-are-the-considerations-when-using-xiao-nrf52840-sense-for-battery-charging
   // VBAT_ENABLE must be LOW to read battery voltage
   digitalWrite(VBAT_ENABLE, LOW);

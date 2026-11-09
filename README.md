@@ -69,7 +69,8 @@ in NVS and survive a plain reflash.
   delivery ticks, stats, settings, and an offline SD map (see below). Repeater: status with airtime
   budget, neighbours, stats, settings. Both: five themes, spectrum analyser (sweeps the band with the
   SX1262 while the mesh is held), finger-sized settings rows (stepper or button per row), heap counter
-  in the status bar, 180-degree display flip, and runtime colour inversion.
+  in the status bar, landscape or portrait orientation (either way up, one touch calibration for
+  all four), and runtime colour inversion.
 - **Contacts**: the list shows all stored contacts (store holds up to `MAX_CONTACTS`, 160 on these
   boards). *Rotate contacts when full* in Settings replaces the oldest non-favourite node instead of
   rejecting new ones, so a mobile node keeps a rolling window of the most-recently-heard peers.
@@ -108,6 +109,22 @@ the on-disk formats in full.
 
 Only tile sources whose terms allow storing tiles offline are offered by `presets`; the large
 general-purpose tile services are deliberately excluded.
+
+## XIAO nRF52840 board (BKBroiler Mesh V2.1)
+
+`variants/xiao_nrf52/platformio.ini` adds `Xiao_nrf52_bkmesh_companion_radio_ble` alongside the
+stock XIAO envs (which are unchanged): XIAO nRF52840 + E22-900M30S + ATGM336H GPS + MAX17048.
+
+| Function | Pins / setting |
+|---|---|
+| E22 | NSS D4, DIO1 D1, BUSY D3, RST D2, RXEN D5, TXEN tied to the module's DIO2 (required for the PA) |
+| GPS | P0.09 / NFC1 = MCU TX, P0.10 / NFC2 = MCU RX, 9600 baud (NFC pads set to GPIO) |
+| I2C | D6 (P1.11) = SDA, D7 (P1.12) = SCL; MAX17048 at 0x36 is the battery reading |
+| TX power | app limit 30 dBm; SX1262 driven at 20 into the 10 dB PA |
+
+Flash `dist/xiao_nrf52_bkmesh_v2_companion_ble.uf2` by double-tapping reset and dropping it on the
+drive. The first boot resets once more while the NFC pads are switched to GPIO. Rebuild with
+`pio run -e Xiao_nrf52_bkmesh_companion_radio_ble -t create_uf2`.
 
 ## Shared-code changes against upstream
 

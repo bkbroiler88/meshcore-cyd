@@ -3,6 +3,20 @@
 CYD-specific changes on top of the [meshcore-dev/meshcore](https://github.com/meshcore-dev/meshcore)
 snapshot (`81dbae5`, 2026-10-15). Dates are when the change landed on `main`.
 
+## 2026-11-09
+
+- Companion + repeater: **Settings > Orientation** — Landscape, Landscape 180, Portrait, Portrait 180
+  on both panels (replaces *Flip display 180*; a flipped board comes up as Landscape 180). One
+  touch calibration serves every orientation. Portrait keeps the landscape font and row sizes;
+  settings rows go two-line (label above the controls), and the status bar, list names, tiles,
+  tab labels and spectrum text are fitted to the narrower width.
+- New env `Xiao_nrf52_bkmesh_companion_radio_ble` for the BKBroiler Mesh V2.1 board (XIAO
+  nRF52840 + E22-900M30S): GPS on the NFC pads (P0.09 MCU TX, P0.10 MCU RX, 9600), I2C on
+  D6 = SDA / D7 = SCL, battery from a MAX17048 gauge (0x36), TX limit 30 dBm (chip at 20 +
+  10 dB PA). The E22's TXEN must be tied to its DIO2 or the PA never switches in.
+  Images: `dist/xiao_nrf52_bkmesh_v2_companion_ble.uf2` (drag-and-drop) and `_dfu.zip`.
+- `dist/` CYD images refreshed.
+
 ## 2026-11-05
 
 - Companion: contact list now shows every stored contact (was capped at 64 rows); the store
