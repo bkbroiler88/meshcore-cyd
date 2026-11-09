@@ -113,7 +113,7 @@ class CYDDisplay : public LGFXDisplay {
   LGFX_CYD disp;
   bool _calibrated = false;
   bool _inverted = (CYD_PANEL_INVERT != 0);
-  uint8_t _rot = 0;   // 0 = normal (setRotation 1), 1 = flipped 180 (setRotation 3)
+  uint8_t _orient = 0;   // ORIENT_* below; NVS "uicyd"/"rot" (old 0/1 flip values map 1:1)
 
   bool loadCalibration(uint16_t cal[8]);
   void saveCalibration(const uint16_t cal[8]);
@@ -144,7 +144,9 @@ public:
 #endif
 
   // One-time 4-point XPT2046 calibration persisted in NVS ("touchcal"/"cal_ls").
-  // force=true re-runs it regardless of stored data.
+  // force=true re-runs it regardless of stored data. LovyanGFX takes the corner points
+  // in the touch controller's fixed reference orientation and maps getTouch() through the
+  // current rotation, so ONE calibration serves all four orientations.
   void touchCalibrate(bool force);
 
   // Panel colour inversion, persisted in NVS ("uicyd"/"inv"); default CYD_PANEL_INVERT.
@@ -152,11 +154,13 @@ public:
   void setInverted(bool on, bool save = true);
   void loadInversion();
 
-  // 180-degree display flip (both landscape orientations). Each orientation keeps its own
-  // touch calibration (separate NVS key), so flipping re-uses or re-runs calibration as needed.
-  bool rotated() const { return _rot != 0; }
-  void setRotated(bool on);
-  void loadRotation();
+  // Screen orientation, persisted in NVS. After setOrientation() the caller re-reads
+  // width()/height() (geoFromPanel) and repaints everything.
+  enum : uint8_t { ORIENT_LANDSCAPE = 0, ORIENT_LANDSCAPE_180, ORIENT_PORTRAIT, ORIENT_PORTRAIT_180, ORIENT_COUNT };
+  uint8_t orientation() const { return _orient; }
+  void setOrientation(uint8_t o);
+  static const char* orientationName(uint8_t o);
+  void loadOrientation();
 
   // Calibrated touch in LOGICAL (UI_ZOOM-divided) coordinates. False when not touched.
   bool touched(int* x, int* y);

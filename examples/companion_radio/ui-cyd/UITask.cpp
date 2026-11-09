@@ -109,12 +109,7 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
   _sensors = sensors;
   _prefs = node_prefs;
   _gfx = _display ? &_display->device() : NULL;
-  if (_gfx) {
-    g_geo.W = _gfx->width();
-    g_geo.H = _gfx->height();
-    float fx = g_geo.W / 320.0f, fy = g_geo.H / 240.0f;
-    g_geo.fs = fx < fy ? fx : fy;
-  }
+  if (_gfx) geoFromPanel(_gfx->width(), _gfx->height());
 #ifdef PIN_USER_BTN
   user_btn.begin();
 #endif
@@ -496,7 +491,9 @@ void UITask::drawStatusBar(bool force) {
     strcpy(_statusCache, line);
     g->fillRect(0, 0, GW, S(L::STATUS_H), TH.bar);
     txt(g, S(8), cy, "<", TH.accent, textdatum_t::middle_left);
-    g->setClipRect(S(24), 0, S(200), S(L::STATUS_H));
+    int nameW = GW - S(24) - S(64);
+    if (nameW > S(200)) nameW = S(200);
+    g->setClipRect(S(24), 0, nameW, S(L::STATUS_H));
     txt(g, S(24), cy, c->name, TH.text, textdatum_t::middle_left);
     g->clearClipRect();
     txt(g, (GW - S(8)), cy, extra, TH.muted, textdatum_t::middle_right);
@@ -504,9 +501,13 @@ void UITask::drawStatusBar(bool force) {
   }
 
   // --- normal screens: three independently cached regions
+  // portrait: the right cluster (BLE, clock, battery) needs ~118 units, so the name and
+  // heap pill move left to stay clear of it
+  const int nameW = GPORTRAIT ? S(62) : S(118);
+  const int pillX = GPORTRAIT ? S(64) : S(120);
   if (force) {
     g->fillRect(0, 0, GW, S(L::STATUS_H), TH.bar);
-    g->setClipRect(0, 0, S(118), S(L::STATUS_H));
+    g->setClipRect(0, 0, nameW, S(L::STATUS_H));
     txt(g, S(8), cy, _prefs->node_name, TH.text, textdatum_t::middle_left);
     g->clearClipRect();
     _heapCacheKb = -1;
@@ -519,10 +520,10 @@ void UITask::drawStatusBar(bool force) {
     char hb[8]; snprintf(hb, sizeof(hb), "%dk", kb);
     uint16_t pbg = kb < 16 ? TH.danger : (kb < 24 ? TH.tileAmber : TH.tileGreen);
     uint16_t pfg = kb < 16 ? TH.text : (kb < 24 ? TH.tileAmberFg : TH.tileGreenFg);
-    g->fillRect(S(120), 0, S(46), S(L::STATUS_H), TH.bar);
+    g->fillRect(pillX, 0, S(46), S(L::STATUS_H), TH.bar);
     int pw = g->textWidth(hb) + S(10);
-    g->fillRoundRect(S(122), cy - S(8), pw, S(16), S(8), pbg);
-    txt(g, S(122) + pw / 2, cy, hb, pfg, textdatum_t::middle_center);
+    g->fillRoundRect(pillX + S(2), cy - S(8), pw, S(16), S(8), pbg);
+    txt(g, pillX + S(2) + pw / 2, cy, hb, pfg, textdatum_t::middle_center);
   }
   // right cluster: BLE, clock, battery
   int b = battPercent();
@@ -613,7 +614,10 @@ static void tile(LGFX_CYD* g, int col, int y, uint16_t bg, uint16_t fg, const ch
   int x = tileX(col), w = tileW();
   g->fillRoundRect(x, S(y), w, S(62), S(6), bg);
   txt(g, x + w / 2, S(y + 24), big, fg, textdatum_t::middle_center, 1.0f, FONT_BIG);
-  txt(g, x + w / 2, S(y + 48), label, fg, textdatum_t::middle_center);
+  // portrait tiles are narrower: drop the label a font size if it would touch the edges
+  g->setFont(FONT_BODY);
+  const lgfx::IFont* lf = (g->textWidth(label) > w - S(6)) ? FONT_SMALL : FONT_BODY;
+  txt(g, x + w / 2, S(y + 48), label, fg, textdatum_t::middle_center, 1.0f, lf);
 }
 static void actionTile(LGFX_CYD* g, int col, int y, const char* label) {
   int x = tileX(col), w = tileW();
@@ -695,8 +699,10 @@ void UITask::drawContacts(bool full) {
     g->fillCircle(S(21), y + S(L::ROW_H / 2), S(13), av[k]);
     char ini[3] = { c.name[0] ? c.name[0] : '?', 0, 0 };
     txt(g, S(21), y + S(L::ROW_H / 2), ini, avfg[k], textdatum_t::middle_center);
-    // name + meta
-    g->setClipRect(S(42), y, S(190), S(L::ROW_H));
+    // name + meta (clip stops short of the unread badge at GW-40 on narrow panels)
+    int textW = GW - S(42) - S(48);
+    if (textW > S(190)) textW = S(190);
+    g->setClipRect(S(42), y, textW, S(L::ROW_H));
     txt(g, S(42), y + S(4), c.name, TH.text);
     char ago[12]; fmtAgo(c.lastmod, ago, sizeof(ago));
     char meta[48];
@@ -745,7 +751,9 @@ void UITask::drawChannels(bool full) {
     if (y + S(L::ROW_H) > bottom) break;
     g->drawFastHLine(0, y + S(L::ROW_H) - 1, GW, TH.line);
     txt(g, S(21), y + S(L::ROW_H / 2), "#", TH.accent, textdatum_t::middle_center, 1.0f, FONT_BIG);
-    g->setClipRect(S(42), y, S(220), S(L::ROW_H));
+    int textW = GW - S(42) - S(48);
+    if (textW > S(220)) textW = S(220);
+    g->setClipRect(S(42), y, textW, S(L::ROW_H));
     txt(g, S(42), y + S(L::ROW_H / 2), ch.name, TH.text, textdatum_t::middle_left);
     g->clearClipRect();
     uint8_t key[8] = { _channelIdx[r] };
@@ -864,7 +872,11 @@ void UITask::drawChat(bool full) {
 
 // ---------------------------------------------------------------- settings (finger-friendly list)
 
-enum : uint8_t { SID_TX = 1, SID_RXBOOST, SID_BT, SID_GPS, SID_TZ, SID_ADVERT, SID_ROTATE, SID_SPECTRUM, SID_THEME, SID_INVERT, SID_FLIP, SID_RECAL, SID_HIBERNATE, SID_MAP };
+enum : uint8_t { SID_TX = 1, SID_RXBOOST, SID_BT, SID_GPS, SID_TZ, SID_ADVERT, SID_ROTATE, SID_SPECTRUM, SID_THEME, SID_INVERT, SID_ORIENT, SID_RECAL, SID_HIBERNATE, SID_MAP };
+
+// set by a setting that forces a full repaint while staying on the Settings screen (theme,
+// orientation), so the list comes back at the same scroll position instead of the top
+static bool s_keepSettingsScroll = false;
 
 // mirrors AUTO_ADD_OVERWRITE_OLDEST in MyMesh.cpp: when the contact store is full, overwrite
 // the oldest non-favourite contact (by last-heard) instead of rejecting the new one.
@@ -894,7 +906,7 @@ void UITask::fillSettings(bool rebuild) {
   if (rebuild) L_.header("display");
   btn(SID_THEME, "Theme", TH.name);
   btn(SID_INVERT, "Invert colours", _display->inverted() ? "on" : "off");
-  btn(SID_FLIP, "Flip display 180", _display->rotated() ? "on" : "off");
+  btn(SID_ORIENT, "Orientation", CYDDisplay::orientationName(_display->orientation()));
   btn(SID_RECAL, "Recalibrate touch", "Start");
   if (rebuild) L_.header("power");
   btn(SID_HIBERNATE, "Hibernate", _confirmHibernate ? "Confirm" : "Sleep", true);
@@ -929,9 +941,13 @@ void UITask::applySetting(uint8_t id, SetPart part) {
 #ifdef SPECTRUM_ANALYZER
     case SID_SPECTRUM: enterSpectrum(); return;
 #endif
-    case SID_THEME: _themeIdx = (_themeIdx + 1) % THEME_COUNT; g_theme = &THEMES[_themeIdx]; saveTheme(); _fullRedraw = true; return;
+    case SID_THEME: _themeIdx = (_themeIdx + 1) % THEME_COUNT; g_theme = &THEMES[_themeIdx]; saveTheme(); s_keepSettingsScroll = true; _fullRedraw = true; return;
     case SID_INVERT: _display->setInverted(!_display->inverted()); break;
-    case SID_FLIP: _display->setRotated(!_display->rotated()); _fullRedraw = true; return;
+    case SID_ORIENT:   // cycle Landscape -> Land 180 -> Portrait -> Port 180
+      _display->setOrientation((_display->orientation() + 1) % CYDDisplay::ORIENT_COUNT);
+      geoFromPanel(_gfx->width(), _gfx->height());
+      s_keepSettingsScroll = true; _fullRedraw = true;
+      return;
     case SID_RECAL: _display->touchCalibrate(true); _fullRedraw = true; return;
     case SID_HIBERNATE: if (_confirmHibernate) shutdown(); _confirmHibernate = true; break;
     default: break;
@@ -943,7 +959,13 @@ void UITask::applySetting(uint8_t id, SetPart part) {
 void UITask::drawSettings(bool full) {
   LGFX_CYD* g = _gfx;
   int top = S(L::STATUS_H), bottom = GH - S(L::TAB_H);
-  if (full) { g->fillScreen(TH.bg); drawStatusBar(true); drawTabBar(); fillSettings(true); _settings.draw(g, top, bottom, true); _listRelayout = false; _dirty = 0; return; }
+  if (full) {
+    int keep = _settings.scroll();
+    g->fillScreen(TH.bg); drawStatusBar(true); drawTabBar(); fillSettings(true);
+    if (s_keepSettingsScroll && keep > 0) _settings.scrollBy(keep, top, bottom);   // clamps to the new layout
+    s_keepSettingsScroll = false;
+    _settings.draw(g, top, bottom, true); _listRelayout = false; _dirty = 0; return;
+  }
   if (_dirty & D_LIST) { fillSettings(false); _settings.draw(g, top, bottom, _listRelayout); _listRelayout = false; }
   _dirty = 0;
 }
@@ -1096,8 +1118,9 @@ void UITask::spectrumStep() {
     unsigned long now = millis();
     if (now - _sweepRateAt >= 1000) { _sweepRate = _sweeps; _sweeps = 0; _sweepRateAt = now; }
     char hdr[48];
-    if (_specPeakHz) snprintf(hdr, sizeof(hdr), "%.3f MHz %d dBm  %u/s", _specPeakHz / 1e6f, _specPeakDbm, _sweepRate);
-    else strcpy(hdr, "sweeping");
+    if (!_specPeakHz) strcpy(hdr, "sweeping");
+    else if (GPORTRAIT) snprintf(hdr, sizeof(hdr), "%.3f %ddBm", _specPeakHz / 1e6f, _specPeakDbm);
+    else snprintf(hdr, sizeof(hdr), "%.3f MHz %d dBm  %u/s", _specPeakHz / 1e6f, _specPeakDbm, _sweepRate);
     g->fillRect(S(90), 0, (GW - S(90)), S(L::STATUS_H), TH.bar);
     txt(g, (GW - S(8)), S(L::STATUS_H / 2), hdr, TH.text, textdatum_t::middle_right);
   }
@@ -1124,7 +1147,7 @@ void UITask::drawSpectrum(bool full) {
   txt(g, S(2), ly, f0, TH.muted);
   txt(g, (GW / 2), ly, f1, TH.muted, textdatum_t::top_center);
   txt(g, (GW - S(2)), ly, f2, TH.muted, textdatum_t::top_right);
-  txt(g, (GW / 2), (GH - S(12)), "mesh paused  |  tap plot: reset max hold", TH.muted, textdatum_t::middle_center);
+  txt(g, (GW / 2), (GH - S(12)), GPORTRAIT ? "tap plot: reset max hold" : "mesh paused  |  tap plot: reset max hold", TH.muted, textdatum_t::middle_center);
   for (int i = 0; i < SPEC_BINS; i++) { _specH[i] = 0; _specMaxH[i] = 0; }
   drawWaterfall();
 }

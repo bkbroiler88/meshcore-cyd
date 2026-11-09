@@ -8,10 +8,14 @@
 // (= min(W/320, H/240), so vertical positions map exactly on both panels), while
 // horizontal positions anchor on the real width GW. 2.8": 320x240 fs=1.0;
 // 3.5": 480x320 fs=1.333 - a 3:2 panel, NOT a 4:3 one scaled up.
+// Portrait (H > W) authors against 240x320 instead, so fs stays 1.0 / 1.333 on the two
+// panels in every orientation: fonts, row and key heights match; only W and H swap.
 struct Geo { int W, H; float fs; };
 extern Geo g_geo;
 #define GW (g_geo.W)
 #define GH (g_geo.H)
+#define GPORTRAIT (g_geo.H > g_geo.W)
+void geoFromPanel(int w, int h);   // set g_geo from the panel's current width/height
 static inline int S(int v) { return (int)(v * g_geo.fs + 0.5f); }
 
 // Anti-aliased fonts by role, picked per panel (no bitmap scaling)

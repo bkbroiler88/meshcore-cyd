@@ -87,9 +87,7 @@ void UITask::runCli(const char* cmd) {
 void UITask::begin(NodePrefs* node_prefs, const char* build_date, const char* firmware_version) {
   _prefs = node_prefs;
   _gfx = &_display->device();
-  g_geo.W = _gfx->width(); g_geo.H = _gfx->height();
-  float fx = g_geo.W / 320.0f, fy = g_geo.H / 240.0f;
-  g_geo.fs = fx < fy ? fx : fy;
+  geoFromPanel(_gfx->width(), _gfx->height());
   StrHelper::strncpy(_version, firmware_version, sizeof(_version));
   StrHelper::strncpy(_build, build_date, sizeof(_build));
 #ifdef PIN_USER_BTN
@@ -123,9 +121,12 @@ void UITask::showAlert(const char* text, int ms) {
 void UITask::drawStatusBar(bool force) {
   LGFX_CYD* g = _gfx;
   int cy = S(L::STATUS_H / 2);
+  // portrait: no uptime in the bar (it is on the Stats tab), name + heap pill sit further left
+  const int nameW = GPORTRAIT ? S(62) : S(118);
+  const int pillX = GPORTRAIT ? S(64) : S(120);
   if (force) {
     g->fillRect(0, 0, GW, S(L::STATUS_H), TH.bar);
-    g->setClipRect(0, 0, S(118), S(L::STATUS_H));
+    g->setClipRect(0, 0, nameW, S(L::STATUS_H));
     txt(g, S(8), cy, _prefs->node_name, TH.text, textdatum_t::middle_left);
     g->clearClipRect();
     _heapCacheKb = -1; _statusCache[0] = 0;
@@ -136,12 +137,13 @@ void UITask::drawStatusBar(bool force) {
     char hb[8]; snprintf(hb, sizeof(hb), "%dk", kb);
     uint16_t pbg = kb < 16 ? TH.danger : (kb < 24 ? TH.tileAmber : TH.tileGreen);
     uint16_t pfg = kb < 16 ? TH.text : (kb < 24 ? TH.tileAmberFg : TH.tileGreenFg);
-    g->fillRect(S(120), 0, S(46), S(L::STATUS_H), TH.bar);
+    g->fillRect(pillX, 0, S(46), S(L::STATUS_H), TH.bar);
     int pw = g->textWidth(hb) + S(10);
-    g->fillRoundRect(S(122), cy - S(8), pw, S(16), S(8), pbg);
-    txt(g, S(122) + pw / 2, cy, hb, pfg, textdatum_t::middle_center);
+    g->fillRoundRect(pillX + S(2), cy - S(8), pw, S(16), S(8), pbg);
+    txt(g, pillX + S(2) + pw / 2, cy, hb, pfg, textdatum_t::middle_center);
   }
-  char up[16]; fmtUptime(the_mesh.getUptimeSecs(), up, sizeof(up));
+  char up[16]; up[0] = 0;
+  if (!GPORTRAIT) fmtUptime(the_mesh.getUptimeSecs(), up, sizeof(up));
   int b = battPercent();
   char line[40]; snprintf(line, sizeof(line), "%s|%d", up, b);
   if (strcmp(line, _statusCache) == 0) return;
@@ -160,8 +162,10 @@ void UITask::drawStatusBar(bool force) {
     g->fillRect(x - bw + 2, cy - bh / 2 + 2, (bw - 4) * b / 100, bh - 4, b < 20 ? TH.danger : TH.ok);
   }
   x -= bw + S(8);
-  char padded[16]; snprintf(padded, sizeof(padded), "%11s", up);
-  g->setTextColor(TH.muted, TH.bar); g->drawString(padded, x, cy);
+  if (!GPORTRAIT) {
+    char padded[16]; snprintf(padded, sizeof(padded), "%11s", up);
+    g->setTextColor(TH.muted, TH.bar); g->drawString(padded, x, cy);
+  }
   g->setTextColor(TH.text);
 }
 
@@ -174,7 +178,8 @@ void UITask::drawTabBar() {
   int cy = y + S(L::TAB_H / 2), cw = GW / 5;
   for (int i = 0; i < 5; i++) {
     bool sel = (_screen == tabs[i]);
-    txt(g, i * cw + cw / 2, cy, names[i], sel ? TH.accent : TH.muted, textdatum_t::middle_center, 1.0f, FONT_SMALL);
+    const char* nm = (i == 1 && GPORTRAIT) ? "Nodes" : names[i];   // "Neighbours" overruns a 1/5 portrait tab
+    txt(g, i * cw + cw / 2, cy, nm, sel ? TH.accent : TH.muted, textdatum_t::middle_center, 1.0f, FONT_SMALL);
     if (sel) g->fillRect(i * cw + cw / 8, y + S(L::TAB_H - 3), cw * 3 / 4, S(2), TH.accent);
   }
 }
@@ -209,7 +214,10 @@ static void tile(LGFX_CYD* g, int col, int y, uint16_t bg, uint16_t fg, const ch
   int x = tileX(col), w = tileW();
   g->fillRoundRect(x, S(y), w, S(58), S(6), bg);
   txt(g, x + w / 2, S(y + 22), big, fg, textdatum_t::middle_center, 1.0f, FONT_BIG);
-  txt(g, x + w / 2, S(y + 45), label, fg, textdatum_t::middle_center);
+  // portrait tiles are narrower: drop the label a font size if it would touch the edges
+  g->setFont(FONT_BODY);
+  const lgfx::IFont* lf = (g->textWidth(label) > w - S(6)) ? FONT_SMALL : FONT_BODY;
+  txt(g, x + w / 2, S(y + 45), label, fg, textdatum_t::middle_center, 1.0f, lf);
 }
 
 // one cached text line: repaint only when the text changed
@@ -268,12 +276,13 @@ void UITask::drawStatus(bool full) {
     if (the_mesh.getNeighbourList(nb, 1) > 0) {
       char hex[10]; mesh::Utils::toHex(hex, nb[0]->id.pub_key, 4);
       char ago[12]; fmtAgo(nb[0]->heard_timestamp, ago, sizeof(ago));
-      snprintf(v, sizeof(v), "%s  %s  RSSI %d  SNR %.1f", hex, ago, (int)radio_driver.getLastRSSI(), radio_driver.getLastSNR());
+      if (GPORTRAIT) snprintf(v, sizeof(v), "%s %s %d/%.1f", hex, ago, (int)radio_driver.getLastRSSI(), radio_driver.getLastSNR());
+      else snprintf(v, sizeof(v), "%s  %s  RSSI %d  SNR %.1f", hex, ago, (int)radio_driver.getLastRSSI(), radio_driver.getLastSNR());
     } else {
       strcpy(v, "nothing yet");
     }
-    lineOut(g, 130, "last heard", v, TH.text, _lineCache[1]);
-    snprintf(v, sizeof(v), "flood %lu  direct %lu  crc %lu  queue %d",
+    lineOut(g, 130, GPORTRAIT ? "last heard (RSSI/SNR)" : "last heard", v, TH.text, _lineCache[1]);
+    snprintf(v, sizeof(v), GPORTRAIT ? "fl %lu  dir %lu  crc %lu  q %d" : "flood %lu  direct %lu  crc %lu  queue %d",
       (unsigned long)the_mesh.getFloodDups(), (unsigned long)the_mesh.getDirectDups(),
       (unsigned long)radio_driver.getPacketsRecvErrors(), the_mesh.getTxQueueLen());
     lineOut(g, 158, "dups dropped / errors", v, TH.text, _lineCache[2]);
@@ -325,7 +334,11 @@ void UITask::drawNeighbours(bool full) {
 
 // ---------------------------------------------------------------- settings (finger-friendly list)
 
-enum : uint8_t { SID_TX = 1, SID_AF, SID_TXDELAY, SID_DTXDELAY, SID_ADVINT, SID_RXBOOST, SID_SPECTRUM, SID_THEME, SID_INVERT, SID_RECAL, SID_FLOODADV, SID_REBOOT };
+enum : uint8_t { SID_TX = 1, SID_AF, SID_TXDELAY, SID_DTXDELAY, SID_ADVINT, SID_RXBOOST, SID_SPECTRUM, SID_THEME, SID_INVERT, SID_ORIENT, SID_RECAL, SID_FLOODADV, SID_REBOOT };
+
+// set by a setting that forces a full repaint while staying on Settings (theme, orientation)
+// so the list comes back at the same scroll position instead of the top
+static bool s_keepSettingsScroll = false;
 
 static const char* advIntLabel(uint8_t half_mins, char* out, size_t n) {
   if (half_mins == 0) snprintf(out, n, "off"); else snprintf(out, n, "%d min", half_mins * 2);
@@ -348,6 +361,7 @@ void UITask::fillSettings(bool rebuild) {
   if (rebuild) L_.header("display");
   btn(SID_THEME, "Theme", TH.name);
   btn(SID_INVERT, "Invert colours", _display->inverted() ? "on" : "off");
+  btn(SID_ORIENT, "Orientation", CYDDisplay::orientationName(_display->orientation()));
   btn(SID_RECAL, "Recalibrate touch", "Start");
   if (rebuild) L_.header("node  (hold BOOT)");
 #ifdef SPECTRUM_ANALYZER
@@ -379,8 +393,13 @@ void UITask::applySetting(uint8_t id, SetPart part) {
 #ifdef SPECTRUM_ANALYZER
     case SID_SPECTRUM: enterSpectrum(); return;
 #endif
-    case SID_THEME:    _themeIdx = (_themeIdx + 1) % THEME_COUNT; g_theme = &THEMES[_themeIdx]; saveTheme(); _fullRedraw = true; return;
+    case SID_THEME:    _themeIdx = (_themeIdx + 1) % THEME_COUNT; g_theme = &THEMES[_themeIdx]; saveTheme(); s_keepSettingsScroll = true; _fullRedraw = true; return;
     case SID_INVERT:   _display->setInverted(!_display->inverted()); break;
+    case SID_ORIENT:   // cycle Landscape -> Land 180 -> Portrait -> Port 180
+      _display->setOrientation((_display->orientation() + 1) % CYDDisplay::ORIENT_COUNT);
+      geoFromPanel(_gfx->width(), _gfx->height());
+      s_keepSettingsScroll = true; _fullRedraw = true;
+      return;
     case SID_RECAL:    _display->touchCalibrate(true); _fullRedraw = true; return;
     case SID_FLOODADV: the_mesh.sendSelfAdvertisement(1000, true); showAlert("Flood advert queued", 1200); break;
     case SID_REBOOT:   if (_confirmReboot) _board->reboot(); _confirmReboot = true; break;
@@ -393,7 +412,13 @@ void UITask::applySetting(uint8_t id, SetPart part) {
 void UITask::drawSettings(bool full) {
   LGFX_CYD* g = _gfx;
   int top = S(L::STATUS_H), bottom = GH - S(L::TAB_H);
-  if (full) { g->fillScreen(TH.bg); drawStatusBar(true); drawTabBar(); fillSettings(true); _settings.draw(g, top, bottom, true); _listRelayout = false; _dirty = 0; return; }
+  if (full) {
+    int keep = _settings.scroll();
+    g->fillScreen(TH.bg); drawStatusBar(true); drawTabBar(); fillSettings(true);
+    if (s_keepSettingsScroll && keep > 0) _settings.scrollBy(keep, top, bottom);   // clamps to the new layout
+    s_keepSettingsScroll = false;
+    _settings.draw(g, top, bottom, true); _listRelayout = false; _dirty = 0; return;
+  }
   if (_dirty & D_LIST) { fillSettings(false); _settings.draw(g, top, bottom, _listRelayout); _listRelayout = false; }
   _dirty = 0;
 }
@@ -540,7 +565,8 @@ void UITask::spectrumStep() {
     unsigned long now = millis();
     if (now - _sweepRateAt >= 1000) { _sweepRate = _sweeps; _sweeps = 0; _sweepRateAt = now; }
     char hdr[48];
-    if (_specPeakHz) snprintf(hdr, sizeof(hdr), "%.3f MHz %d dBm  %u/s", _specPeakHz / 1e6f, _specPeakDbm, _sweepRate);
+    if (_specPeakHz && GPORTRAIT) snprintf(hdr, sizeof(hdr), "%.3f %ddBm", _specPeakHz / 1e6f, _specPeakDbm);
+    else if (_specPeakHz) snprintf(hdr, sizeof(hdr), "%.3f MHz %d dBm  %u/s", _specPeakHz / 1e6f, _specPeakDbm, _sweepRate);
     else strcpy(hdr, "sweeping");
     g->fillRect(S(90), 0, (GW - S(90)), S(L::STATUS_H), TH.bar);
     txt(g, (GW - S(8)), S(L::STATUS_H / 2), hdr, TH.text, textdatum_t::middle_right);
@@ -568,7 +594,7 @@ void UITask::drawSpectrum(bool full) {
   txt(g, S(2), ly, f0, TH.muted);
   txt(g, (GW / 2), ly, f1, TH.muted, textdatum_t::top_center);
   txt(g, (GW - S(2)), ly, f2, TH.muted, textdatum_t::top_right);
-  txt(g, (GW / 2), (GH - S(12)), "mesh paused  |  tap plot: reset max hold", TH.muted, textdatum_t::middle_center);
+  txt(g, (GW / 2), (GH - S(12)), GPORTRAIT ? "tap plot: reset max hold" : "mesh paused  |  tap plot: reset max hold", TH.muted, textdatum_t::middle_center);
   for (int i = 0; i < SPEC_BINS; i++) { _specH[i] = 0; _specMaxH[i] = 0; }
   drawWaterfall();
 }

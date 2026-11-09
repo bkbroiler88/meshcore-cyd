@@ -6,8 +6,11 @@
 #endif
 
 static const char* kCalNamespace = "touchcal";
-static const char* kCalKeyNorm = "cal_ls";     // normal landscape
-static const char* kCalKeyFlip = "cal_ls180";  // 180-flipped landscape
+static const char* kCalKey = "cal_ls";         // one calibration for every orientation
+static const char* kCalKeyOld = "cal_ls180";   // read-only fallback: earlier builds saved flipped-landscape here
+
+// LovyanGFX rotation per ORIENT_*: the panels are portrait-native (240x320 / 320x480)
+static const uint8_t kPanelRot[CYDDisplay::ORIENT_COUNT] = { 1, 3, 0, 2 };
 
 void CYDDisplay::loadInversion() {
   Preferences p;
@@ -18,17 +21,29 @@ void CYDDisplay::loadInversion() {
   disp.invertDisplay(_inverted);
 }
 
-void CYDDisplay::loadRotation() {
+void CYDDisplay::loadOrientation() {
   Preferences p;
-  if (p.begin("uicyd", true)) { _rot = p.getUChar("rot", 0) ? 1 : 0; p.end(); }
+  if (p.begin("uicyd", true)) {
+    _orient = p.getUChar("rot", ORIENT_LANDSCAPE);
+    p.end();
+  }
+  if (_orient >= ORIENT_COUNT) _orient = ORIENT_LANDSCAPE;
 }
 
-void CYDDisplay::setRotated(bool on) {
-  _rot = on ? 1 : 0;
-  { Preferences p; if (p.begin("uicyd", false)) { p.putUChar("rot", _rot); p.end(); } }
-  disp.setRotation(_rot ? 3 : 1);
-  // calibration is orientation-specific; load this orientation's, or run it if none stored
-  touchCalibrate(false);
+void CYDDisplay::setOrientation(uint8_t o) {
+  if (o >= ORIENT_COUNT) o = ORIENT_LANDSCAPE;
+  _orient = o;
+  { Preferences p; if (p.begin("uicyd", false)) { p.putUChar("rot", _orient); p.end(); } }
+  disp.setRotation(kPanelRot[_orient]);   // touch follows the rotation; calibration unchanged
+}
+
+const char* CYDDisplay::orientationName(uint8_t o) {
+  switch (o) {
+    case ORIENT_LANDSCAPE_180: return "Land 180";
+    case ORIENT_PORTRAIT:      return "Portrait";
+    case ORIENT_PORTRAIT_180:  return "Port 180";
+    default:                   return "Landscape";
+  }
 }
 
 void CYDDisplay::setInverted(bool on, bool save) {
@@ -43,8 +58,8 @@ void CYDDisplay::setInverted(bool on, bool save) {
 #ifdef UI_CYD
 bool CYDDisplay::begin() {
   disp.init();
-  loadRotation();
-  disp.setRotation(_rot ? 3 : 1);
+  loadOrientation();
+  disp.setRotation(kPanelRot[_orient]);
   disp.setColorDepth(16);
   disp.setBrightness(200);
   loadInversion();
@@ -88,15 +103,17 @@ bool CYDDisplay::begin() {
 bool CYDDisplay::loadCalibration(uint16_t cal[8]) {
   Preferences p;
   if (!p.begin(kCalNamespace, true)) return false;
-  size_t got = p.getBytes(_rot ? kCalKeyFlip : kCalKeyNorm, cal, sizeof(uint16_t) * 8);
+  const size_t want = sizeof(uint16_t) * 8;
+  size_t got = p.isKey(kCalKey) ? p.getBytes(kCalKey, cal, want) : 0;
+  if (got != want && p.isKey(kCalKeyOld)) got = p.getBytes(kCalKeyOld, cal, want);
   p.end();
-  return got == sizeof(uint16_t) * 8;
+  return got == want;
 }
 
 void CYDDisplay::saveCalibration(const uint16_t cal[8]) {
   Preferences p;
   if (p.begin(kCalNamespace, false)) {
-    p.putBytes(_rot ? kCalKeyFlip : kCalKeyNorm, cal, sizeof(uint16_t) * 8);
+    p.putBytes(kCalKey, cal, sizeof(uint16_t) * 8);
     p.end();
   }
 }

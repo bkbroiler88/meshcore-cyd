@@ -34,3 +34,12 @@ const Palette THEMES[THEME_COUNT] = {
 };
 const Palette* g_theme = &THEMES[0];
 Geo g_geo = { 320, 240, 1.0f };
+
+void geoFromPanel(int w, int h) {
+  g_geo.W = w;
+  g_geo.H = h;
+  float fx, fy;
+  if (h > w) { fx = w / 240.0f; fy = h / 320.0f; }   // portrait
+  else       { fx = w / 320.0f; fy = h / 240.0f; }   // landscape
+  g_geo.fs = fx < fy ? fx : fy;
+}

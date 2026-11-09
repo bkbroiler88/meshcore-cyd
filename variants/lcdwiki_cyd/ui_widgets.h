@@ -31,6 +31,7 @@ public:
   static const int BTN_W = 76;      // button
   static const int STEP_W = 40;     // -/+ key
   static const int VAL_W = 56;      // value box between the keys
+  static const int ROW_H_TALL = 62; // narrow (portrait) panels: label line above the controls
 
   void clear() { _count = 0; _scroll = 0; memset(_cache, 0, sizeof(_cache)); }
   int  header(const char* label);
@@ -51,7 +52,11 @@ private:
   SetItem _items[MAX_ITEMS];
   char _cache[MAX_ITEMS][24];
   int _count = 0, _scroll = 0;
-  int rowHeight(int i) const { return S(_items[i].type == SET_HEADER ? HDR_H : ROW_H); }
+  // Too narrow for label + controls on one line (portrait): label on its own line, controls below.
+  static bool tall() { return GW - S(8 + STEP_W + 4 + VAL_W + 4 + STEP_W + 6) < S(140); }
+  int rowHeight(int i) const { return S(_items[i].type == SET_HEADER ? HDR_H : (tall() ? ROW_H_TALL : ROW_H)); }
+  // vertical centre of the control band for a row at y with height h
+  static int ctrlCY(int y, int h) { return tall() ? y + h - S(4) - S(BTN_H) / 2 : y + h / 2; }
   int rowY(int i, int top) const;   // y of row i given scroll, or -1 if above
   void drawRow(LGFX_CYD* g, int i, int y, bool frame, bool pressedMinus, bool pressedPlus, bool pressedBtn);
 };

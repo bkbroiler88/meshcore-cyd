@@ -57,12 +57,17 @@ void SettingsList::drawRow(LGFX_CYD* g, int i, int y, bool frame, bool pMinus, b
     }
     return;
   }
-  int cy = y + h / 2;
+  int cy = ctrlCY(y, h);
   if (frame) {
     g->fillRect(0, y, GW, h, TH.bg);
     g->drawFastHLine(0, y + h - 1, GW, TH.line);
-    g->setClipRect(0, y, GW - S(8 + STEP_W + 4 + VAL_W + 4 + STEP_W) - S(6), h);
-    wtxt(g, S(8), cy, it.label, TH.text, textdatum_t::middle_left);
+    if (tall()) {
+      g->setClipRect(0, y, GW - S(8), h);
+      wtxt(g, S(8), y + S(13), it.label, TH.text, textdatum_t::middle_left);
+    } else {
+      g->setClipRect(0, y, GW - S(8 + STEP_W + 4 + VAL_W + 4 + STEP_W) - S(6), h);
+      wtxt(g, S(8), cy, it.label, TH.text, textdatum_t::middle_left);
+    }
     g->clearClipRect();
   }
   int bh = S(BTN_H), by = cy - bh / 2;
@@ -120,7 +125,7 @@ int SettingsList::hit(int x, int y, int top, int bottom, SetPart* part) const {
     if (y >= ry && y < ry + h) {
       const SetItem& it = _items[i];
       if (it.type == SET_HEADER) return -1;
-      int bh = S(BTN_H), by = ry + h / 2 - bh / 2;
+      int bh = S(BTN_H), by = ctrlCY(ry, h) - bh / 2;
       if (y < by - S(4) || y >= by + bh + S(4)) return -1;   // outside the control band
       if (it.type == SET_STEPPER) {
         int plusX = GW - S(8) - S(STEP_W);
